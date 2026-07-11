@@ -1,0 +1,24 @@
+[project]
+name = "incident-commander"
+version = "0.1.0"
+description = "Multi-agent active differential diagnosis for SRE incidents — probe-driven, calibrated, cryptographically sealed."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "cryptography>=42.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+# Only needed for the live LLM path (IC_USE_LLM=1). The offline analytical engine
+# and the whole ablation/demo run without it. The Anthropic SDK also drives OpenRouter's
+# Anthropic-compatible /messages endpoint, so one dep covers both providers.
+llm = ["anthropic>=0.40", "python-dotenv>=1.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ic", "ic.agents", "server"]

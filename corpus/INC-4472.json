@@ -1,0 +1,175 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4472",
+  "slice": "adversarial_redherring",
+  "title": "Checkout errors climb six minutes after a deploy — but the deploy is innocent",
+
+  "ground_truth": {
+    "root_cause_id": "H2",
+    "summary": "The payment-gateway dependency began returning 503s due to an external provider outage. Checkout errors are all PaymentGatewayTimeout. A checkout-service deploy (v3.02.0) landed six minutes earlier but only changed a logging line and is unrelated. Rolling it back would waste time and NOT restore service. The tell: cart-service, which also calls payment-gateway but did NOT receive the deploy, shows the identical failure.",
+    "rollback_correct": false
+  },
+
+  "human_baseline_seconds": 2700,
+
+  "alert": {
+    "service": "checkout-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-07-10T14:12:40Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 9.1% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["checkout-service", "cart-service", "payment-gateway", "orders-db"],
+    "edges": [
+      { "from": "checkout-service", "to": "payment-gateway" },
+      { "from": "checkout-service", "to": "orders-db" },
+      { "from": "cart-service", "to": "payment-gateway" }
+    ]
+  },
+
+  "observables": [
+    { "name": "error_type_breakdown",   "unit": "map", "desc": "checkout errors grouped by exception class" },
+    { "name": "sibling_service_errors", "unit": "pct", "desc": "cart-service error rate (shares payment-gateway, did NOT get the deploy)" },
+    { "name": "payment_gw_response",     "unit": "map", "desc": "payment-gateway upstream response codes seen by callers" }
+  ],
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 14:06 deploy v3.02.0 broke checkout; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "stays_healthy", "note": "if the deploy is the cause, only checkout should fail; cart-service (no deploy) should be fine" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "payment-gateway degraded externally; every caller fails regardless of deploy state.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "also_failing", "note": "cart-service shares the dependency and should show the same failure despite no deploy" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://checkout-service/deploys/v3.02.0",
+        "retrieved_at": "2026-07-10T14:12:50Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "THE TRAP: a recent deploy, temporally close to the alert. A change-biased agent will latch onto this and recommend rollback. The diff is deliberately innocuous.",
+        "payload": {
+          "version": "v3.02.0",
+          "deployed_at": "2026-07-10T14:06:00Z",
+          "deployed_by": "j.silva",
+          "commit_sha": "1a7bd30"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://checkout-service/commit/1a7bd30",
+        "retrieved_at": "2026-07-10T14:12:52Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "1a7bd30",
+          "files": [
+            {
+              "path": "src/handlers/checkout.py",
+              "hunk": "-        logger.info(\"checkout started\")\n+        logger.info(\"checkout started for user=%s\", user_id)"
+            }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/http_5xx_rate",
+        "retrieved_at": "2026-07-10T14:12:55Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-10T14:06:00Z", 0.1],
+            ["2026-07-10T14:09:00Z", 0.2],
+            ["2026-07-10T14:11:00Z", 4.5],
+            ["2026-07-10T14:12:40Z", 9.1]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db/query_latency_p95",
+        "retrieved_at": "2026-07-10T14:12:56Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "orders-db is HEALTHY — rules out a DB story, leaving the deploy (H1) and payment-gateway (H2) as the live contest.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-10T14:06:00Z", 38.0],
+            ["2026-07-10T14:10:00Z", 41.0],
+            ["2026-07-10T14:12:00Z", 39.0]
+          ]
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://cart-service/http_5xx_rate",
+        "retrieved_at": null,
+        "measures": ["sibling_service_errors"],
+        "probe_id": "P_sibling",
+        "_note_for_authors": "THE DISCRIMINATOR. cart-service calls payment-gateway but did NOT receive the deploy. It is failing in lockstep with checkout. That is impossible if the deploy is the cause — it falsifies H1 and confirms H2. rollback_correct=false hinges on this.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-10T14:06:00Z", 0.1],
+            ["2026-07-10T14:09:00Z", 0.3],
+            ["2026-07-10T14:11:00Z", 4.2],
+            ["2026-07-10T14:12:40Z", 8.7]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "logs://checkout-service/error_breakdown",
+        "retrieved_at": null,
+        "measures": ["error_type_breakdown"],
+        "probe_id": "P_error_types",
+        "_note_for_authors": "Secondary supporting probe. All errors are PaymentGatewayTimeout — none originate in the changed logging code path. Consistent with H2 but weaker than P_sibling because a determined skeptic could argue the deploy caused a downstream timeout. P_sibling is the clean kill.",
+        "payload": {
+          "map": { "PaymentGatewayTimeout": 982, "NullPointer": 0, "DBError": 3 }
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_sibling",
+      "connector": "prometheus",
+      "measures": ["sibling_service_errors"],
+      "cost_ms": 350,
+      "load_class": "read_light",
+      "description": "cart-service 5xx rate (shares payment-gateway, no deploy), 14:00–14:15"
+    },
+    {
+      "probe_id": "P_error_types",
+      "connector": "logs",
+      "measures": ["error_type_breakdown"],
+      "cost_ms": 620,
+      "load_class": "read_light",
+      "description": "checkout-service error class breakdown, 14:06–14:13"
+    }
+  ]
+}

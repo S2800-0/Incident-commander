@@ -1,0 +1,179 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4475",
+  "slice": "deployment_induced",
+  "title": "Checkout errors six minutes after a deploy — and this time the deploy really is guilty",
+
+  "ground_truth": {
+    "root_cause_id": "H1",
+    "summary": "Deploy v5.00.0 introduced a null-dereference in the checkout path; checkout alone fails. cart-service, which shares the same session-cache dependency but did NOT receive the deploy, stays healthy — proving the fault is the deploy, not the shared dependency. Rolling back v5.00.0 is the correct fix. This is the common, easy case: deploy correlation plus a clean sibling check. Probes-off should already get it right from prior; the probe just raises confidence and rules out the dependency story.",
+    "rollback_correct": true
+  },
+
+  "human_baseline_seconds": 1500,
+
+  "alert": {
+    "service": "checkout-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-07-11T08:30:20Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 11.0% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["checkout-service", "cart-service", "session-cache"],
+    "edges": [
+      { "from": "checkout-service", "to": "session-cache" },
+      { "from": "cart-service", "to": "session-cache" }
+    ]
+  },
+
+  "observables": [
+    { "name": "sibling_service_errors", "unit": "pct", "desc": "cart-service error rate (shares session-cache, did NOT get the deploy)" },
+    { "name": "error_type_breakdown",   "unit": "map", "desc": "checkout errors grouped by exception class" }
+  ],
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 08:24 deploy v5.00.0 introduced a null-dereference and broke checkout; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "stays_healthy", "note": "if the deploy is the cause, only checkout should fail; cart-service (no deploy) should be fine" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "The shared session-cache dependency degraded, failing every caller regardless of deploy.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "also_failing", "note": "cart-service shares the dependency and should fail too if the cache is at fault" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://checkout-service/deploys/v5.00.0",
+        "retrieved_at": "2026-07-11T08:30:30Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "version": "v5.00.0",
+          "deployed_at": "2026-07-11T08:24:00Z",
+          "deployed_by": "p.novak",
+          "commit_sha": "b91d7e2"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://checkout-service/commit/b91d7e2",
+        "retrieved_at": "2026-07-11T08:30:32Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "b91d7e2",
+          "files": [
+            { "path": "src/handlers/checkout.py", "hunk": "-        user = session.get(user_id)\n+        user = session.get(user_id).profile" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/http_5xx_rate",
+        "retrieved_at": "2026-07-11T08:30:34Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-11T08:24:00Z", 0.1],
+            ["2026-07-11T08:27:00Z", 3.0],
+            ["2026-07-11T08:30:00Z", 11.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://session-cache/hit_latency_p95",
+        "retrieved_at": "2026-07-11T08:30:36Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "session-cache is HEALTHY in prior — flat latency. This makes a shared-dependency story (H2) unlikely from prior, so probes-off should already lean H1. The probe (sibling errors) is the clean confirmation, not the only evidence.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-11T08:24:00Z", 2.0],
+            ["2026-07-11T08:27:00Z", 2.1],
+            ["2026-07-11T08:30:00Z", 2.0]
+          ]
+        }
+      },
+      {
+        "source_type": "prior_incident",
+        "source_uri": "vectordb://incidents/INC-3140",
+        "retrieved_at": "2026-07-11T08:30:38Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "incident_id": "INC-3140",
+          "signature": "null-dereference introduced by deploy, single service 5xx",
+          "resolution": "Rolled back the offending deploy; errors cleared immediately."
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://cart-service/http_5xx_rate",
+        "retrieved_at": null,
+        "measures": ["sibling_service_errors"],
+        "probe_id": "P_sibling",
+        "_note_for_authors": "THE DISCRIMINATOR. cart-service shares session-cache but did NOT get the deploy. It stays healthy (<0.3%). That is impossible if the shared cache were at fault (H2) — it confirms the deploy (H1). rollback_correct=true hinges on this.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-11T08:24:00Z", 0.1],
+            ["2026-07-11T08:27:00Z", 0.2],
+            ["2026-07-11T08:30:00Z", 0.2]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "logs://checkout-service/error_breakdown",
+        "retrieved_at": null,
+        "measures": ["error_type_breakdown"],
+        "probe_id": "P_err_types",
+        "_note_for_authors": "Distractor: all errors are NullPointer (consistent with H1) but neither hypothesis makes an opposing prediction about error_type_breakdown, so its info-gain is 0.",
+        "payload": {
+          "map": { "NullPointer": 964, "CacheTimeout": 0, "DBError": 2 }
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_sibling",
+      "connector": "prometheus",
+      "measures": ["sibling_service_errors"],
+      "cost_ms": 340,
+      "load_class": "read_light",
+      "description": "cart-service 5xx rate (shares session-cache, no deploy), 08:20–08:31"
+    },
+    {
+      "probe_id": "P_err_types",
+      "connector": "logs",
+      "measures": ["error_type_breakdown"],
+      "cost_ms": 610,
+      "load_class": "read_light",
+      "description": "checkout-service error class breakdown, 08:24–08:30"
+    }
+  ]
+}

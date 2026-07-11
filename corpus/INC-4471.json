@@ -1,0 +1,238 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4471",
+  "slice": "ambiguous",
+  "title": "Checkout 5xx spike three minutes after a deploy — but an upstream service also wobbled first",
+
+  "ground_truth": {
+    "root_cause_id": "H1",
+    "summary": "Deploy v2.14.0 reduced the DB connection pool from 50 to 10; under peak load this caused connection contention, elevated query latency, CPU spent on connection-wait retries, and cascading 5xx. The inventory-service latency blip at 09:00:40 was an unrelated routine cache warm and is a coincidence.",
+    "rollback_correct": true
+  },
+
+  "human_baseline_seconds": 2100,
+
+  "alert": {
+    "service": "checkout-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-07-10T09:08:15Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 12.4% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["checkout-service", "orders-db", "inventory-service", "payment-gateway"],
+    "edges": [
+      { "from": "checkout-service", "to": "orders-db" },
+      { "from": "checkout-service", "to": "inventory-service" },
+      { "from": "checkout-service", "to": "payment-gateway" }
+    ]
+  },
+
+  "observables": [
+    { "name": "connection_wait_time",  "unit": "ms",  "desc": "time checkout requests spend waiting for a DB connection" },
+    { "name": "inventory_p99_latency", "unit": "ms",  "desc": "upstream inventory-service p99 latency" },
+    { "name": "cpu_utilization",       "unit": "pct", "desc": "checkout-service pod CPU" }
+  ],
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 09:00 deploy reduced the DB connection pool, causing contention under load.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "connection_wait_time",  "prediction": "rises_first", "note": "wait climbs before CPU and before any upstream latency" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "Upstream inventory-service degraded first and cascaded downstream into checkout.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "connection_wait_time",  "prediction": "rises_later", "note": "if upstream leads, connection-wait is a downstream symptom that lags the inventory latency rise" },
+        { "observable": "inventory_p99_latency", "prediction": "rises_first", "note": "upstream latency leads the whole cascade" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://checkout-service/deploys/v2.14.0",
+        "retrieved_at": "2026-07-10T09:08:22Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "version": "v2.14.0",
+          "deployed_at": "2026-07-10T09:00:00Z",
+          "deployed_by": "a.rahman",
+          "commit_sha": "9c2e4f1"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://checkout-service/commit/9c2e4f1",
+        "retrieved_at": "2026-07-10T09:08:24Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "9c2e4f1",
+          "files": [
+            {
+              "path": "config/database.yaml",
+              "hunk": "  pool:\n-   max_size: 50\n+   max_size: 10\n    timeout_ms: 3000"
+            }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/cpu",
+        "retrieved_at": "2026-07-10T09:08:25Z",
+        "measures": ["cpu_utilization"],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-10T09:00:00Z", 35.0],
+            ["2026-07-10T09:02:00Z", 37.0],
+            ["2026-07-10T09:03:12Z", 78.0],
+            ["2026-07-10T09:05:00Z", 82.0],
+            ["2026-07-10T09:07:00Z", 88.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db/query_latency_p95",
+        "retrieved_at": "2026-07-10T09:08:26Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-10T09:00:00Z", 40.0],
+            ["2026-07-10T09:03:00Z", 55.0],
+            ["2026-07-10T09:05:41Z", 1250.0],
+            ["2026-07-10T09:07:00Z", 1400.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/http_5xx_rate",
+        "retrieved_at": "2026-07-10T09:08:27Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-10T09:00:00Z", 0.1],
+            ["2026-07-10T09:05:00Z", 0.3],
+            ["2026-07-10T09:07:03Z", 12.4]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://inventory-service/p99_latency",
+        "retrieved_at": "2026-07-10T09:08:28Z",
+        "measures": ["inventory_p99_latency"],
+        "probe_id": null,
+        "_note_for_authors": "THE TRAP: this modest rise at 09:00:40 is EARLIER than the checkout CPU spike (09:03:12), which makes an upstream-cascade story (H2) look plausible from prior evidence alone. It is a coincidence (routine cache warm). Do not let the discriminator live here.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-10T09:00:00Z", 60.0],
+            ["2026-07-10T09:00:40Z", 95.0],
+            ["2026-07-10T09:02:00Z", 88.0],
+            ["2026-07-10T09:05:00Z", 72.0],
+            ["2026-07-10T09:07:00Z", 65.0]
+          ]
+        }
+      },
+      {
+        "source_type": "prior_incident",
+        "source_uri": "vectordb://incidents/INC-2209",
+        "retrieved_at": "2026-07-10T09:08:30Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "incident_id": "INC-2209",
+          "signature": "CPU spike + DB latency + connection pool misconfiguration",
+          "resolution": "Reverted the config change that lowered the connection pool; restored pool size."
+        }
+      },
+      {
+        "source_type": "runbook",
+        "source_uri": "kb://runbooks/checkout-db-connection-exhaustion",
+        "retrieved_at": "2026-07-10T09:08:31Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "title": "checkout-service DB connection exhaustion",
+          "body": "Symptoms: rising connection-wait, DB p95 latency, CPU on retry loops. Check recent pool config changes. Remediation: restore pool size / roll back offending change."
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://checkout-service/connection_wait_time",
+        "retrieved_at": null,
+        "measures": ["connection_wait_time"],
+        "probe_id": "P_conn_wait",
+        "_note_for_authors": "THE DISCRIMINATOR. Connection-wait begins climbing at 09:01:15 — BEFORE the inventory blip becomes material and 2 min before the CPU spike. This matches H1's prediction (wait rises first) and FALSIFIES H2 (which predicted upstream latency leads). Present in probeable ONLY.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-10T09:00:00Z", 2.0],
+            ["2026-07-10T09:01:15Z", 45.0],
+            ["2026-07-10T09:02:30Z", 180.0],
+            ["2026-07-10T09:03:12Z", 260.0],
+            ["2026-07-10T09:05:00Z", 410.0]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://inventory-service/error_rate",
+        "retrieved_at": null,
+        "measures": ["inventory_p99_latency"],
+        "probe_id": "P_inv_errors",
+        "_note_for_authors": "A plausible but LOW-value distractor probe. Inventory error rate stays flat — consistent with the blip being benign — but it does not directly resolve the ordering question, so its info gain is lower than P_conn_wait. Included so probe selection is non-trivial.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-10T09:00:00Z", 0.02],
+            ["2026-07-10T09:03:00Z", 0.02],
+            ["2026-07-10T09:07:00Z", 0.03]
+          ]
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_conn_wait",
+      "connector": "prometheus",
+      "measures": ["connection_wait_time"],
+      "cost_ms": 410,
+      "load_class": "read_light",
+      "description": "Connection-wait histogram for checkout-service, 08:55–09:10"
+    },
+    {
+      "probe_id": "P_inv_errors",
+      "connector": "prometheus",
+      "measures": ["inventory_p99_latency"],
+      "cost_ms": 380,
+      "load_class": "read_light",
+      "description": "inventory-service error rate, 08:55–09:10"
+    }
+  ]
+}

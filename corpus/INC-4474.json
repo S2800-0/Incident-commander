@@ -1,0 +1,186 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4474",
+  "slice": "cascading_dependency",
+  "title": "Checkout 5xx eight minutes after a deploy — but this time the upstream really did lead",
+
+  "ground_truth": {
+    "root_cause_id": "H2",
+    "summary": "inventory-service p99 latency began climbing at 10:01 and sustained, saturating checkout's calls and cascading into 5xx. A checkout deploy (v4.01.0) landed at 10:00 and only tweaked a client timeout; rolling it back does NOT fix the upstream. This is the genuine cascade — the structural mirror of INC-4471, where an early upstream blip was a coincidence. The discriminator is identical (the ordering of the upstream signal) and lives only in probeable.",
+    "rollback_correct": false
+  },
+
+  "human_baseline_seconds": 2400,
+
+  "alert": {
+    "service": "checkout-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-07-11T10:08:10Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 8.0% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["checkout-service", "orders-db", "inventory-service"],
+    "edges": [
+      { "from": "checkout-service", "to": "orders-db" },
+      { "from": "checkout-service", "to": "inventory-service" }
+    ]
+  },
+
+  "observables": [
+    { "name": "inventory_p99_latency", "unit": "ms",  "desc": "upstream inventory-service p99 latency" },
+    { "name": "cpu_utilization",       "unit": "pct", "desc": "checkout-service pod CPU" },
+    { "name": "error_type_breakdown",  "unit": "map", "desc": "checkout errors grouped by exception class" }
+  ],
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 10:00 deploy v4.01.0 changed a DB timeout and broke checkout; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "inventory_p99_latency", "prediction": "rises_later", "note": "if the deploy is the cause, upstream inventory latency is a downstream/coincidental signal that lags" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "Upstream inventory-service degraded first and cascaded downstream into checkout.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "inventory_p99_latency", "prediction": "rises_first", "note": "upstream latency leads the whole cascade" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://checkout-service/deploys/v4.01.0",
+        "retrieved_at": "2026-07-11T10:08:20Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "THE TRAP: a recent deploy 8 min before the alert. Change-biased agent latches on and wants rollback. The diff is an innocuous timeout tweak.",
+        "payload": {
+          "version": "v4.01.0",
+          "deployed_at": "2026-07-11T10:00:00Z",
+          "deployed_by": "d.chen",
+          "commit_sha": "7f3a0c9"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://checkout-service/commit/7f3a0c9",
+        "retrieved_at": "2026-07-11T10:08:22Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "7f3a0c9",
+          "files": [
+            { "path": "config/clients.yaml", "hunk": "  inventory_client:\n-   timeout_ms: 800\n+   timeout_ms: 1000" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/http_5xx_rate",
+        "retrieved_at": "2026-07-11T10:08:24Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-11T10:00:00Z", 0.1],
+            ["2026-07-11T10:03:00Z", 0.3],
+            ["2026-07-11T10:05:00Z", 4.0],
+            ["2026-07-11T10:06:30Z", 8.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/cpu",
+        "retrieved_at": "2026-07-11T10:08:26Z",
+        "measures": ["cpu_utilization"],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-11T10:00:00Z", 30.0],
+            ["2026-07-11T10:04:00Z", 70.0],
+            ["2026-07-11T10:07:00Z", 85.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db/query_latency_p95",
+        "retrieved_at": "2026-07-11T10:08:28Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "orders-db healthy — rules out a DB story, leaving deploy (H1) vs upstream cascade (H2).",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-11T10:00:00Z", 40.0],
+            ["2026-07-11T10:04:00Z", 41.0],
+            ["2026-07-11T10:08:00Z", 39.0]
+          ]
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://inventory-service/p99_latency",
+        "retrieved_at": null,
+        "measures": ["inventory_p99_latency"],
+        "probe_id": "P_inv_latency",
+        "_note_for_authors": "THE DISCRIMINATOR. inventory p99 sustains a rise from 10:01 — BEFORE checkout CPU (10:04) and before the 5xx onset (10:03). That is a real upstream lead: it confirms H2 (rises_first) and falsifies H1 (rises_later). Absent from prior — prior has no inventory series at all.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-11T10:00:00Z", 55.0],
+            ["2026-07-11T10:01:00Z", 300.0],
+            ["2026-07-11T10:03:00Z", 520.0],
+            ["2026-07-11T10:05:00Z", 640.0]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "logs://checkout-service/error_breakdown",
+        "retrieved_at": null,
+        "measures": ["error_type_breakdown"],
+        "probe_id": "P_err_types",
+        "_note_for_authors": "Distractor: error class breakdown. Neither hypothesis makes an opposing prediction about it, so its info-gain is 0 and the selector must not pick it.",
+        "payload": {
+          "map": { "InventoryTimeout": 731, "NullPointer": 0, "DBError": 1 }
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_inv_latency",
+      "connector": "prometheus",
+      "measures": ["inventory_p99_latency"],
+      "cost_ms": 420,
+      "load_class": "read_light",
+      "description": "inventory-service p99 latency, 09:55–10:10"
+    },
+    {
+      "probe_id": "P_err_types",
+      "connector": "logs",
+      "measures": ["error_type_breakdown"],
+      "cost_ms": 600,
+      "load_class": "read_light",
+      "description": "checkout-service error class breakdown, 10:00–10:08"
+    }
+  ]
+}
