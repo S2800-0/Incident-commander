@@ -1,0 +1,207 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4476",
+  "slice": "ambiguous",
+  "title": "orders-db write latency spike after a deploy — a lock storm, or replication backpressure from the standby?",
+
+  "ground_truth": {
+    "root_cause_id": "H1",
+    "summary": "Deploy v6.02.0 introduced a long-running transaction that holds row locks on orders-db; lock-wait climbs first and sustains, throttling writes and cascading into checkout 5xx. The standby replica's replication-lag blip at 10:00:40 was a brief, self-recovering catch-up after the deploy restart — a coincidence, not the lead. Rolling back the deploy removes the offending transaction and restores writes.",
+    "rollback_correct": true
+  },
+
+  "human_baseline_seconds": 2400,
+
+  "alert": {
+    "service": "checkout-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-07-12T10:08:00Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 9.5% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["checkout-service", "orders-db", "orders-db-standby"],
+    "edges": [
+      { "from": "checkout-service", "to": "orders-db" },
+      { "from": "orders-db", "to": "orders-db-standby" }
+    ]
+  },
+
+  "observables": [
+    { "name": "lock_wait_time",   "unit": "ms", "desc": "time write transactions spend waiting on row locks in orders-db" },
+    { "name": "replication_lag",  "unit": "ms", "desc": "orders-db-standby replication lag behind the primary" },
+    { "name": "db_write_latency", "unit": "ms", "desc": "orders-db write statement latency" }
+  ],
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 10:00 deploy introduced a long-running transaction that holds row locks, causing write contention on orders-db.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "lock_wait_time", "prediction": "rises_first", "note": "lock-wait leads the write-latency and 5xx rise if a held lock is the cause" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "The standby replica's replication lag caused upstream commit backpressure that cascaded into checkout write failures.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "lock_wait_time",  "prediction": "rises_later", "note": "if replication backpressure leads, lock-wait is a downstream symptom that lags" },
+        { "observable": "replication_lag", "prediction": "rises_first", "note": "standby lag leads the whole stall" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://orders-service/deploys/v6.02.0",
+        "retrieved_at": "2026-07-12T10:08:10Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "THE TRAP for the change agent: a recent deploy 8 min before the alert.",
+        "payload": {
+          "version": "v6.02.0",
+          "deployed_at": "2026-07-12T10:00:00Z",
+          "deployed_by": "s.kaur",
+          "commit_sha": "3ab77c1"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://orders-service/commit/3ab77c1",
+        "retrieved_at": "2026-07-12T10:08:12Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "3ab77c1",
+          "files": [
+            { "path": "src/orders/reconcile.py", "hunk": "-    with db.begin():\n-        settle_batch(rows)\n+    with db.begin():\n+        for row in rows:\n+            settle_and_audit(row)  # holds the txn open across the whole batch" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/http_5xx_rate",
+        "retrieved_at": "2026-07-12T10:08:14Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-12T10:00:00Z", 0.1],
+            ["2026-07-12T10:04:00Z", 0.3],
+            ["2026-07-12T10:06:00Z", 3.0],
+            ["2026-07-12T10:07:30Z", 9.5]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db/write_latency_p95",
+        "retrieved_at": "2026-07-12T10:08:16Z",
+        "measures": ["db_write_latency"],
+        "probe_id": null,
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-12T10:00:00Z", 20.0],
+            ["2026-07-12T10:03:30Z", 520.0],
+            ["2026-07-12T10:05:00Z", 900.0],
+            ["2026-07-12T10:07:00Z", 1200.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db-standby/replication_lag",
+        "retrieved_at": "2026-07-12T10:08:18Z",
+        "measures": ["replication_lag"],
+        "probe_id": null,
+        "_note_for_authors": "THE TRAP: a brief replication-lag spike at 10:00:40 (240ms) that RECOVERS to ~58ms. It is EARLIER than the sustained signals, so a cascade story (H2) looks plausible from prior alone — but it is transient (a post-deploy catch-up), not a sustained lead. The discriminator (lock-wait ordering) must live only in probeable.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-12T10:00:00Z", 50.0],
+            ["2026-07-12T10:00:40Z", 240.0],
+            ["2026-07-12T10:02:00Z", 140.0],
+            ["2026-07-12T10:04:00Z", 70.0],
+            ["2026-07-12T10:06:00Z", 58.0]
+          ]
+        }
+      },
+      {
+        "source_type": "prior_incident",
+        "source_uri": "vectordb://incidents/INC-2884",
+        "retrieved_at": "2026-07-12T10:08:20Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "incident_id": "INC-2884",
+          "signature": "long transaction holds row locks; lock-wait and write latency climb after a deploy",
+          "resolution": "Rolled back the deploy that opened a batch-wide transaction; lock-wait cleared."
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://orders-db/lock_wait_time",
+        "retrieved_at": null,
+        "measures": ["lock_wait_time"],
+        "probe_id": "P_lock_wait",
+        "_note_for_authors": "THE DISCRIMINATOR. lock-wait sustains a rise from 10:01:30 — BEFORE write-latency (10:03:30) and long before the replication blip recovers. It leads sustainedly → confirms H1 (rises_first) and falsifies H2 (rises_later). Present in probeable only.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-12T10:00:00Z", 3.0],
+            ["2026-07-12T10:01:30Z", 60.0],
+            ["2026-07-12T10:03:00Z", 220.0],
+            ["2026-07-12T10:05:00Z", 380.0]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://orders-db-standby/replication_error_rate",
+        "retrieved_at": null,
+        "measures": ["replication_lag"],
+        "probe_id": "P_repl_lag",
+        "_note_for_authors": "Low-value distractor. Standby replication has recovered and is flat — consistent with the blip being benign — but it does not resolve the ordering question, so its info-gain is lower than P_lock_wait.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-07-12T10:00:00Z", 50.0],
+            ["2026-07-12T10:03:00Z", 55.0],
+            ["2026-07-12T10:07:00Z", 52.0]
+          ]
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_lock_wait",
+      "connector": "prometheus",
+      "measures": ["lock_wait_time"],
+      "cost_ms": 420,
+      "load_class": "read_light",
+      "description": "orders-db lock-wait histogram, 09:55–10:10"
+    },
+    {
+      "probe_id": "P_repl_lag",
+      "connector": "prometheus",
+      "measures": ["replication_lag"],
+      "cost_ms": 380,
+      "load_class": "read_light",
+      "description": "orders-db-standby replication lag/error rate, 09:55–10:10"
+    }
+  ]
+}

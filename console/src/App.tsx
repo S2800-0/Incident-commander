@@ -8,6 +8,9 @@ type ProbeSel = { probe_id: string; info_gain: number; cost_ms: number; descript
 type ProbeRes = { probe_id: string; summary: string; hash: string; source_uri: string } | null;
 type Sealed = { merkle_root: string; signature: string; leaf_count: number } | null;
 type Verdict = { root_cause_id: string; summary: string; posterior: number; rollback_recommended: boolean; probes_run: string[] } | null;
+type VoiAction = { action_id: string; kind: string; eig: number; cost: number; risk: number; voi_score: number; executable: boolean; description?: string };
+type VoiState = { step: number; actions: VoiAction[] } | null;
+type Stagnation = { best_observation: string | null; best_observation_eig: number; intervention_eig: number | null } | null;
 
 const AGENT_LABEL: Record<string, string> = {
   change_agent: "Change Agent",
@@ -34,6 +37,10 @@ export default function App() {
   const [sealed, setSealed] = useState<Sealed>(null);
   const [verdict, setVerdict] = useState<Verdict>(null);
   const [gate, setGate] = useState<any>(null);
+  const [voi, setVoi] = useState<VoiState>(null);
+  const [stagnation, setStagnation] = useState<Stagnation>(null);
+  const [interventionWouldFire, setInterventionWouldFire] = useState<any>(null);
+  const [provenance, setProvenance] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const startRef = useRef<number>(0);
@@ -48,6 +55,7 @@ export default function App() {
     setLanes({}); setHyps({}); setOrder([]); setAmbiguity(null);
     setProbeSel(null); setProbeRes(null); setExhausted(null);
     setLeaves([]); setSealed(null); setVerdict(null); setGate(null);
+    setVoi(null); setStagnation(null); setInterventionWouldFire(null); setProvenance(null);
   }
 
   function addLeaf(uri: string, hash?: string, probe?: boolean) {
@@ -103,6 +111,18 @@ export default function App() {
         break;
       case "exhausted":
         setExhausted(e);
+        break;
+      case "voi_scored":
+        setVoi({ step: e.step, actions: e.actions });
+        break;
+      case "voi_stagnation_detected":
+        setStagnation({ best_observation: e.best_observation, best_observation_eig: e.best_observation_eig, intervention_eig: e.intervention_eig });
+        break;
+      case "intervention_would_fire":
+        setInterventionWouldFire(e);
+        break;
+      case "provenance_labeled":
+        setProvenance(e.provenance);
         break;
       case "gate_pending":
         setGate(e);
@@ -250,9 +270,63 @@ export default function App() {
                   <div className={`rollback ${verdict.rollback_recommended ? "yes" : "no"}`}>
                     rollback {verdict.rollback_recommended ? "RECOMMENDED" : "not recommended"}
                   </div>
+                  {provenance && (
+                    <div className={`provenance ${interventionWouldFire ? "wouldbe" : ""}`}>
+                      Provenance: {interventionWouldFire ? "interventional (would-be)" : provenance}
+                    </div>
+                  )}
                   {gate && <div className="gated">⛔ {gate.action} gated — awaiting explicit approval (never auto-fired)</div>}
                 </div>
               )}
+            </section>
+
+            {/* PANE 5 — VoI Stagnation Panel (framing overlay: explains WHY the chosen
+                action was chosen, incl. why the intervention would fire if executable) */}
+            <section className="pane voi">
+              <h2>VoI · Value of the Next Action</h2>
+              {!voi && <div className="idle">awaiting action scoring…</div>}
+              {voi && (() => {
+                const obs = voi.actions.filter((a) => a.kind === "observation");
+                const interv = voi.actions.find((a) => a.kind === "intervention");
+                const maxEig = Math.max(1, ...voi.actions.map((a) => a.eig));
+                const argmax = voi.actions.find((a) => a.executable);
+                return (
+                  <>
+                    {stagnation && (
+                      <div className="stagBanner">
+                        Observation VoI collapsed → probing is the last productive step in this loop.
+                      </div>
+                    )}
+                    {interventionWouldFire && (
+                      <div className="stagBanner fire">
+                        Observation exhausted. Intervention would be selected — traffic_shift at 5%, 60s bound. Phase 2 executes; Phase 1 explains.
+                      </div>
+                    )}
+                    {obs.map((a) => (
+                      <div key={a.action_id} className={`voiRow ${stagnation ? "stagnated" : ""}`}>
+                        <span className="voiLabel">{a.action_id}</span>
+                        <div className="voiBar"><div className="voiFill obs" style={{ width: `${Math.max(2, (a.eig / maxEig) * 100)}%` }} /></div>
+                        <span className="voiNum">EIG {a.eig.toFixed(2)}</span>
+                      </div>
+                    ))}
+                    {interv && (
+                      <div className="voiRow">
+                        <span className="voiLabel iv" title="Traffic-shift primitive (5% canary, 60s bound, auto-revert). Specified in our research design (Section 5). Not executed in prototype — see Phase 2.">
+                          {interv.action_id.replace("_placeholder", "")} (not executable) ⓘ
+                        </span>
+                        <div className="voiBar"><div className="voiFill iv" style={{ width: `${Math.max(2, (interv.eig / maxEig) * 100)}%` }} /></div>
+                        <span className="voiNum">EIG {interv.eig.toFixed(2)}</span>
+                      </div>
+                    )}
+                    <div className="voiArgmax">
+                      {verdict
+                        ? `Concluded — remaining observation VoI (${obs.length ? Math.max(...obs.map((a) => a.voi_score)).toFixed(2) : "0"}) below margin need`
+                        : `Argmax → ${argmax ? `run probe ${argmax.action_id}` : "no executable action — conclude"}`}
+                      <span className="voiFormula">  voi = eig − λ·cost − μ·risk  (λ=0.05, μ=1.0)</span>
+                    </div>
+                  </>
+                );
+              })()}
             </section>
 
             {/* PANE 4 — evidence chain */}

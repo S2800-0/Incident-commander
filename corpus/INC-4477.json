@@ -1,0 +1,177 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4477",
+  "slice": "adversarial_redherring",
+  "title": "orders-db CPU pegged after a deploy — a runaway query, or a noisy neighbour on the shared DB host?",
+
+  "ground_truth": {
+    "root_cause_id": "H2",
+    "summary": "A co-tenant database on the shared DB host began a heavy analytics job at 15:05, starving CPU and I/O for every database on the host. orders-db CPU pegged and checkout 5xx followed. A checkout/orders deploy (v3.40.0) landed nine minutes earlier and only touched a query hint, but it is unrelated. The tell: billing-service, which uses billing-db on the SAME host but did NOT receive the deploy, shows the identical degradation. Rolling back the deploy would waste time and NOT restore service — the fix is to throttle/move the noisy co-tenant.",
+    "rollback_correct": false
+  },
+
+  "human_baseline_seconds": 2700,
+
+  "alert": {
+    "service": "checkout-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-07-12T15:07:20Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 8.5% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["checkout-service", "orders-db", "billing-service", "billing-db", "db-host-7"],
+    "edges": [
+      { "from": "checkout-service", "to": "orders-db" },
+      { "from": "billing-service", "to": "billing-db" },
+      { "from": "orders-db", "to": "db-host-7" },
+      { "from": "billing-db", "to": "db-host-7" }
+    ]
+  },
+
+  "observables": [
+    { "name": "sibling_db_errors", "unit": "pct", "desc": "billing-service error rate (uses billing-db on the SAME host, did NOT get the deploy)" },
+    { "name": "db_cpu",            "unit": "pct", "desc": "orders-db CPU utilization" }
+  ],
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 15:00 deploy v3.40.0 shipped a query that overloads orders-db CPU; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "sibling_db_errors", "prediction": "stays_healthy", "note": "if the deploy's query is the cause, only orders-db is affected; billing-db (no deploy) should be fine" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "A noisy co-tenant on the shared database host is starving CPU and I/O, degrading every database on the host.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "sibling_db_errors", "prediction": "also_failing", "note": "billing-db shares the host and should degrade in lockstep despite no deploy" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://orders-service/deploys/v3.40.0",
+        "retrieved_at": "2026-07-12T15:07:30Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "THE TRAP: a recent deploy, temporally close to the alert. A change-biased agent will latch onto it and recommend rollback. The diff is a harmless query hint.",
+        "payload": {
+          "version": "v3.40.0",
+          "deployed_at": "2026-07-12T15:00:00Z",
+          "deployed_by": "r.mehta",
+          "commit_sha": "c40f9a2"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://orders-service/commit/c40f9a2",
+        "retrieved_at": "2026-07-12T15:07:32Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "c40f9a2",
+          "files": [
+            { "path": "src/orders/queries.sql", "hunk": "-SELECT * FROM orders WHERE status = 'open'\n+SELECT /*+ index(orders idx_status) */ * FROM orders WHERE status = 'open'" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/http_5xx_rate",
+        "retrieved_at": "2026-07-12T15:07:34Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-12T15:00:00Z", 0.1],
+            ["2026-07-12T15:04:00Z", 0.4],
+            ["2026-07-12T15:06:00Z", 5.0],
+            ["2026-07-12T15:07:00Z", 8.5]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db/cpu",
+        "retrieved_at": "2026-07-12T15:07:36Z",
+        "measures": ["db_cpu"],
+        "probe_id": null,
+        "_note_for_authors": "orders-db CPU is genuinely pegged — but this alone does not distinguish a runaway query (H1) from a starved host (H2). The sibling DB on the same host (probe) is what decides it.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-12T15:00:00Z", 45.0],
+            ["2026-07-12T15:05:00Z", 88.0],
+            ["2026-07-12T15:07:00Z", 96.0]
+          ]
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://billing-service/http_5xx_rate",
+        "retrieved_at": null,
+        "measures": ["sibling_db_errors"],
+        "probe_id": "P_sibling_db",
+        "_note_for_authors": "THE DISCRIMINATOR. billing-service uses billing-db on the SAME host but did NOT get the deploy. It is failing in lockstep with checkout. That is impossible if the deploy's query were the cause — it falsifies H1 and confirms H2 (noisy neighbour). rollback_correct=false hinges on this.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-12T15:00:00Z", 0.1],
+            ["2026-07-12T15:04:00Z", 0.3],
+            ["2026-07-12T15:06:00Z", 4.0],
+            ["2026-07-12T15:07:00Z", 7.2]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://db-host-7/iowait",
+        "retrieved_at": null,
+        "measures": ["db_cpu"],
+        "probe_id": "P_host_iowait",
+        "_note_for_authors": "Secondary/distractor probe. Host iowait is high (consistent with H2) but neither hypothesis makes an opposing prediction about db_cpu, so its info-gain is 0 and the selector must not pick it over the sibling check.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-07-12T15:00:00Z", 5.0],
+            ["2026-07-12T15:05:00Z", 55.0],
+            ["2026-07-12T15:07:00Z", 71.0]
+          ]
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_sibling_db",
+      "connector": "prometheus",
+      "measures": ["sibling_db_errors"],
+      "cost_ms": 350,
+      "load_class": "read_light",
+      "description": "billing-service 5xx rate (shares db-host-7, no deploy), 14:55–15:10"
+    },
+    {
+      "probe_id": "P_host_iowait",
+      "connector": "prometheus",
+      "measures": ["db_cpu"],
+      "cost_ms": 400,
+      "load_class": "read_light",
+      "description": "db-host-7 iowait, 14:55–15:10"
+    }
+  ]
+}

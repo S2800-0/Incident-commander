@@ -21,8 +21,17 @@ False-positive rollback (adversarial):  OFF 100%  →  ON 0%
 Brier score (lower better):             OFF 0.362 →  ON 0.004
 ```
 
-> Three bundles → numbers are illustrative, not publication-grade. The headline is the
+> Numbers are illustrative, not publication-grade. The headline is the
 > **sign and size of the delta**, reproducible offline in one command.
+
+**VoI framing.** This prototype implements the Value-of-Information decision policy over
+the observation half of the mixed action space specified in our design document. The
+intervention primitive is defined and safety-bounded; its live execution is Phase 2 of
+our roadmap. What runs here is the mechanism that decides when an intervention would be
+justified — which is the research contribution. Every candidate next action carries a
+computed VoI score (EIG − λ·cost − μ·risk); the selector picks argmax over executable
+actions, and the console's VoI panel shows the whole ranking live — including why the
+intervention *would* have been chosen if it were executable.
 
 ---
 

@@ -13,6 +13,14 @@ from .models import Hypothesis, Probe
 EXCLUDED = "excluded"
 HEAVY = "read_heavy"
 
+# --- VoI weights (framing overlay; see ic/voi.py) --------------------------
+# Not hyperparameters to tune — the demo's control surface. MU dominant encodes
+# "prefer observation while it's informative; tolerate intervention only when
+# observation has stagnated." That's the whole idea.
+LAMBDA = 0.05   # cost weight — small; observations are cheap
+MU = 1.00       # risk weight — dominant; makes intervention lose to observation
+                # unless observation EIG is genuinely near zero
+
 
 def divergence(observable: str, hyps: list[Hypothesis]) -> int:
     """Number of *distinct* predictions the surviving hypotheses make about an

@@ -21,6 +21,8 @@ from .llm import llm_enabled
 from .models import EvidenceItem, Hypothesis, Verdict
 from .probe import select_probe
 from .reasoner import is_rollback_hypothesis
+from .voi import (STAGNATION_THRESHOLD, intervention_would_fire,
+                  observation_stagnated, score_actions)
 
 # Hard probe-loop bounds (guardrail).
 K_MAX_PROBES = 4
@@ -114,7 +116,30 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
     probe_loop_t0 = time.time()
     probes_run: list[str] = []
     already = set()
+    voi_step = 0
     while True:
+        # --- VoI overlay: decompose & rank every candidate next action -------
+        voi_step += 1
+        actions = score_actions(hyps, bundle.probe_catalog, already)
+        _emit({"type": "voi_scored", "step": voi_step,
+               "actions": [a.model_dump(mode="json") for a in actions]})
+        if observation_stagnated(actions):
+            obs = [a for a in actions if a.executable]
+            best_obs = max(obs, key=lambda a: a.eig, default=None)
+            interv = next((a for a in actions if not a.executable), None)
+            _emit({"type": "voi_stagnation_detected",
+                   "threshold": STAGNATION_THRESHOLD,
+                   "best_observation": best_obs.action_id if best_obs else None,
+                   "best_observation_eig": best_obs.eig if best_obs else 0.0,
+                   "intervention_eig": interv.eig if interv else None})
+        if intervention_would_fire(actions):
+            # Honest failure mode: we know what SHOULD happen next; we can't demo it.
+            interv = actions[0]
+            _emit({"type": "intervention_would_fire",
+                   "action_id": interv.action_id,
+                   "safety_envelope": interv.safety_envelope,
+                   "unavailable_reason": interv.unavailable_reason})
+
         decision = decide(hyps, bundle.probe_catalog, already)
         if decision.action == "conclude":
             break
@@ -177,6 +202,8 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
         probes_run=probes_run,
         evidence_refs=used_refs,
     )
+
+    _emit({"type": "provenance_labeled", "provenance": verdict.provenance})
 
     if rollback:
         _emit({"type": "gate_pending", "action": "rollback",

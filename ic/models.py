@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Optional
+from enum import Enum
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +66,32 @@ class Probe(BaseModel):
     description: str = ""
 
 
+class ActionKind(str, Enum):
+    OBSERVATION = "observation"
+    INTERVENTION = "intervention"
+
+
+class CandidateAction(BaseModel):
+    """One candidate next action in the joint observation/intervention space.
+    Every Probe maps to kind=OBSERVATION; the intervention placeholder is the one
+    kind=INTERVENTION entry (executable=False in the prototype)."""
+    action_id: str
+    kind: ActionKind
+    description: str                       # human-readable, shown in UI
+    measures: list[str] = Field(default_factory=list)
+
+    # VoI components — all computed by the VoI Engine (ic/voi.py)
+    eig: float = 0.0                       # expected information gain, nats
+    cost: float = 0.0                      # unitless, normalized to probe cost_ms
+    risk: float = 0.0                      # 0.0 for observation; nonzero for intervention
+    voi_score: float = 0.0                 # eig - LAMBDA*cost - MU*risk
+
+    # Intervention-only metadata (None for observation actions)
+    executable: bool = True                # False for the placeholder — CRITICAL
+    unavailable_reason: Optional[str] = None   # e.g. "not_available_in_prototype"
+    safety_envelope: Optional[dict] = None     # bounded %, timeout, revert condition
+
+
 class Verdict(BaseModel):
     incident_id: str
     root_cause_id: str
@@ -76,3 +103,6 @@ class Verdict(BaseModel):
     evidence_refs: list[str]
     merkle_root: Optional[str] = None
     signature: Optional[str] = None
+    # VoI overlay: always "observational" in the prototype — the intervention
+    # primitive is specified but never executed (see ic/voi.py).
+    provenance: Literal["observational", "interventional"] = "observational"

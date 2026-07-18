@@ -33,10 +33,11 @@ header { display: flex; justify-content: space-between; align-items: center;
 .chk { color: var(--dim); display: flex; align-items: center; gap: 5px; }
 .truth { margin-left: auto; color: var(--amber); font-size: 12px; }
 
-.grid { display: grid; grid-template-columns: 1.15fr 0.85fr; grid-template-rows: auto auto;
-  gap: 14px; grid-template-areas: "lanes ticker" "board chain"; }
+.grid { display: grid; grid-template-columns: 1.15fr 0.85fr; grid-template-rows: auto auto auto;
+  gap: 14px; grid-template-areas: "lanes ticker" "board chain" "voi voi"; }
 .lanes { grid-area: lanes; } .ticker { grid-area: ticker; }
 .board { grid-area: board; } .chain { grid-area: chain; }
+.voi { grid-area: voi; }
 
 .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
 .pane h2 { margin: 0 0 12px; font-size: 12px; letter-spacing: 1.5px; color: var(--dim); text-transform: uppercase; }
@@ -103,6 +104,28 @@ header { display: flex; justify-content: space-between; align-items: center;
 .sealStamp { color: var(--green); font-weight: 700; letter-spacing: 1px; }
 .root, .sig { font-size: 11px; color: var(--dim); margin-top: 4px; word-break: break-all; }
 
+/* VoI panel */
+.voiRow { display: grid; grid-template-columns: 300px 1fr 90px; align-items: center;
+  gap: 12px; margin-bottom: 10px; transition: opacity 0.6s ease, filter 0.6s ease; }
+.voiRow.stagnated { opacity: 0.45; filter: saturate(0.3); }
+.voiLabel { font-size: 12px; color: var(--ink); }
+.voiLabel.iv { color: var(--amber); cursor: help; }
+.voiBar { height: 12px; background: #0a121c; border-radius: 6px; overflow: hidden; }
+.voiFill { height: 100%; transition: width 0.3s cubic-bezier(.2,.8,.2,1); }
+.voiFill.obs { background: linear-gradient(90deg, var(--accent), var(--green)); }
+.voiFill.iv { background: repeating-linear-gradient(45deg, var(--amber), var(--amber) 6px, #7a5c1f 6px, #7a5c1f 12px); }
+.voiRow.stagnated .voiFill.obs { background: var(--red); }
+.voiNum { font-size: 12px; color: var(--dim); text-align: right; }
+.voiArgmax { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+  color: var(--accent); font-size: 13px; font-weight: 600; }
+.voiFormula { color: var(--dim); font-weight: 400; font-size: 11px; margin-left: 10px; }
+.stagBanner { background: rgba(245,185,66,0.1); border: 1px solid var(--amber);
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; color: var(--amber);
+  font-size: 12px; font-weight: 600; animation: fade 0.5s ease; }
+.stagBanner.fire { border-color: var(--red); color: var(--red); background: rgba(229,83,60,0.08); }
+.provenance { font-size: 11px; color: var(--dim); margin-top: 6px; letter-spacing: 0.5px; }
+.provenance.wouldbe { color: var(--amber); font-style: italic; }
+
 /* metrics */
 .metrics { display: flex; flex-direction: column; gap: 16px; }
 .headline { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
@@ -126,7 +149,8 @@ footer { color: var(--dim); font-size: 11px; text-align: center; margin-top: 16p
 code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; color: var(--accent); }
 
 @media (max-width: 1000px) {
-  .grid { grid-template-columns: 1fr; grid-template-areas: "lanes" "ticker" "board" "chain"; }
+  .grid { grid-template-columns: 1fr; grid-template-areas: "lanes" "ticker" "board" "voi" "chain"; }
+  .voiRow { grid-template-columns: 150px 1fr 80px; }
   .headline, .charts { grid-template-columns: 1fr; }
   .controls select { min-width: 100%; }
 }

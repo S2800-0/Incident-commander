@@ -148,7 +148,9 @@ class Kind:
 
 
 _DEPLOY_NEG = ["regardless", "unrelated", "innocent", "not related", "despite"]
-_DEPLOY_REF = ["deploy", "config change", "config", "pool", "commit"]
+# Note: intentionally NOT "commit" — it false-matches DB terms like "commit backpressure"
+# / "commit latency". Deploy identity comes from "deploy"/"config"/"rollback" instead.
+_DEPLOY_REF = ["deploy", "config change", "config", "pool"]
 _DEPLOY_CAUSAL = ["broke", "broken", "caused", "causing", "reduced", "introduced",
                   "contention", "misconfig", "exhaust", "roll it back"]
 _ROLLBACK_VERB = ["roll back", "rollback", "revert", "roll it back"]
