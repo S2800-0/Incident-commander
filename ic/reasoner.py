@@ -123,17 +123,34 @@ def interpret_dispersion(probe_item: EvidenceItem, ratio_threshold: float = 2.0)
 ORDERING_VOCAB = {"rises_first", "rises_later"}
 THRESHOLD_VOCAB = {"stays_healthy", "also_failing"}
 DISPERSION_VOCAB = {"old_pods_slower", "uniform_across_pods", "uniform"}
+# Cohort-split interpreter: same math as dispersion (max/min ratio) but with a
+# semantically-cleaner label for intervention results ("did the two cohorts we
+# split the traffic across diverge, or behave the same?"). Used by INC-4478.
+COHORT_VOCAB = {"cohorts_diverge", "cohorts_uniform"}
+
+
+def interpret_cohort_split(probe_item: EvidenceItem, ratio_threshold: float = 2.0) -> str:
+    vals = _numbers_from_map(probe_item.payload.get("map", {}))
+    if len(vals) < 2:
+        return "cohorts_uniform"
+    ratio = max(vals) / max(min(vals), 1e-9)
+    return "cohorts_diverge" if ratio >= ratio_threshold else "cohorts_uniform"
 
 
 def observed_label(observable: str, predictions: set[str],
                    probe_item: EvidenceItem, session: list[EvidenceItem]) -> Optional[str]:
-    """Dispatch to the interpreter matching the vocabulary the hypotheses disagree in."""
+    """Dispatch to the interpreter matching the vocabulary the hypotheses disagree in.
+    Returns None if predictions don't match any known vocab — apply_probe_result then
+    skips this observable (this is how a probe can 'run inconclusively' and stagnate
+    observation without eliminating anyone). See INC-4478 for that pattern."""
     if predictions & ORDERING_VOCAB:
         return interpret_ordering(probe_item, session)
     if predictions & THRESHOLD_VOCAB:
         return interpret_threshold(probe_item)
     if predictions & DISPERSION_VOCAB:
         return interpret_dispersion(probe_item)
+    if predictions & COHORT_VOCAB:
+        return interpret_cohort_split(probe_item)
     return None
 
 

@@ -31,6 +31,14 @@ class Bundle:
         self._probeable = [self._clean(e) for e in raw["evidence"]["probeable"]]
         self._probe_by_id = {e.probe_id: e for e in self._probeable}
 
+        # Intervention results — same shape as probeable items, but reachable only
+        # through run_intervention() and only when observation VoI has stagnated.
+        # Bundles without an intervention_results tier are unchanged.
+        self._intervention_results = [
+            self._clean(e) for e in raw["evidence"].get("intervention_results", [])
+        ]
+        self._intervention_by_id = {e.probe_id: e for e in self._intervention_results}
+
         self.probe_catalog: list[Probe] = [Probe(**p) for p in raw.get("probe_catalog", [])]
 
         self.seed_hypotheses: list[Hypothesis] = []
@@ -79,6 +87,23 @@ class Bundle:
 
     def probe_ids(self) -> list[str]:
         return [p.probe_id for p in self.probe_catalog]
+
+    def intervention_ids(self) -> list[str]:
+        return list(self._intervention_by_id.keys())
+
+    def run_intervention(self, intervention_id: str,
+                         probes_enabled: bool = True) -> EvidenceItem:
+        """Execute a bounded intervention against the fixture (same simulation model
+        as our probes — we author the causal result). Gated by probes_enabled AND
+        by the orchestrator only calling this after human approval AND observation
+        stagnation. There is no way to reach this except through those gates."""
+        if not probes_enabled:
+            raise RuntimeError(
+                f"run_intervention({intervention_id}) called with probes disabled")
+        item = self._intervention_by_id.get(intervention_id)
+        if item is None:
+            raise KeyError(f"No intervention_result for {intervention_id}")
+        return item
 
     def observable_units(self) -> dict[str, str]:
         return {o["name"]: o.get("unit", "") for o in self.observables}

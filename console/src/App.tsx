@@ -10,7 +10,9 @@ type Sealed = { merkle_root: string; signature: string; leaf_count: number } | n
 type Verdict = { root_cause_id: string; summary: string; posterior: number; rollback_recommended: boolean; probes_run: string[] } | null;
 type VoiAction = { action_id: string; kind: string; eig: number; cost: number; risk: number; voi_score: number; executable: boolean; description?: string };
 type VoiState = { step: number; actions: VoiAction[] } | null;
-type Stagnation = { best_observation: string | null; best_observation_eig: number; intervention_eig: number | null } | null;
+type Stagnation = { best_observation: string | null; best_observation_eig: number; intervention_eig: number | null; intervention_available?: boolean } | null;
+type GatePending = { action: string; intervention_id?: string; description?: string; safety_envelope?: any; note?: string } | null;
+type InterventionResult = { intervention_id: string; summary: string; hash: string } | null;
 
 const AGENT_LABEL: Record<string, string> = {
   change_agent: "Change Agent",
@@ -41,9 +43,16 @@ export default function App() {
   const [stagnation, setStagnation] = useState<Stagnation>(null);
   const [interventionWouldFire, setInterventionWouldFire] = useState<any>(null);
   const [provenance, setProvenance] = useState<string | null>(null);
+  const [interventionGate, setInterventionGate] = useState<GatePending>(null);
+  const [interventionApproved, setInterventionApproved] = useState(false);
+  const [interventionResult, setInterventionResult] = useState<InterventionResult>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const startRef = useRef<number>(0);
+  // Events arriving while the intervention gate is open are buffered here so the
+  // console visibly pauses on "human approval required" — the click drains the queue.
+  const gatePausedRef = useRef<boolean>(false);
+  const queuedRef = useRef<ICEvent[]>([]);
 
   useEffect(() => {
     fetch("/incidents").then((r) => r.json()).then(setIncidents).catch(() => {});
@@ -56,6 +65,9 @@ export default function App() {
     setProbeSel(null); setProbeRes(null); setExhausted(null);
     setLeaves([]); setSealed(null); setVerdict(null); setGate(null);
     setVoi(null); setStagnation(null); setInterventionWouldFire(null); setProvenance(null);
+    setInterventionGate(null); setInterventionApproved(false); setInterventionResult(null);
+    gatePausedRef.current = false;
+    queuedRef.current = [];
   }
 
   function addLeaf(uri: string, hash?: string, probe?: boolean) {
@@ -116,13 +128,26 @@ export default function App() {
         setVoi({ step: e.step, actions: e.actions });
         break;
       case "voi_stagnation_detected":
-        setStagnation({ best_observation: e.best_observation, best_observation_eig: e.best_observation_eig, intervention_eig: e.intervention_eig });
+        setStagnation({ best_observation: e.best_observation, best_observation_eig: e.best_observation_eig, intervention_eig: e.intervention_eig, intervention_available: e.intervention_available });
         break;
       case "intervention_would_fire":
         setInterventionWouldFire(e);
         break;
       case "provenance_labeled":
         setProvenance(e.provenance);
+        break;
+      case "gate_pending":
+        if (e.action === "intervention") {
+          // PAUSE — the human must click Approve before subsequent events render.
+          setInterventionGate({ action: e.action, intervention_id: e.intervention_id, description: e.description, safety_envelope: e.safety_envelope, note: e.note });
+          gatePausedRef.current = true;
+        } else {
+          setGate(e); // rollback gate — informational, doesn't pause
+        }
+        break;
+      case "intervention_executed":
+        setInterventionResult({ intervention_id: e.intervention_id, summary: e.summary, hash: e.hash });
+        addLeaf(e.source_uri, e.hash, true);
         break;
       case "gate_pending":
         setGate(e);
@@ -139,6 +164,25 @@ export default function App() {
     }
   }
 
+  // Buffer events that arrive while the intervention gate is open — they render
+  // only after the user clicks Approve.
+  function dispatch(e: ICEvent) {
+    if (gatePausedRef.current && e.type !== "gate_pending") {
+      queuedRef.current.push(e);
+      return;
+    }
+    handle(e);
+  }
+
+  function approveIntervention() {
+    gatePausedRef.current = false;
+    setInterventionApproved(true);
+    const queued = queuedRef.current;
+    queuedRef.current = [];
+    // Drain with light pacing so the collapse still reads as a sequence, not a jump.
+    queued.forEach((e, i) => setTimeout(() => handle(e), i * 320));
+  }
+
   function start() {
     if (wsRef.current) wsRef.current.close();
     reset();
@@ -148,7 +192,7 @@ export default function App() {
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     wsRef.current = ws;
     ws.onopen = () => ws.send(JSON.stringify({ incident_id: sel, probes_enabled: probesOn, replay }));
-    ws.onmessage = (m) => handle(JSON.parse(m.data));
+    ws.onmessage = (m) => dispatch(JSON.parse(m.data));
     ws.onclose = () => setRunning(false);
   }
 
@@ -250,6 +294,33 @@ export default function App() {
             {/* PANE 2 — hypothesis board */}
             <section className="pane board">
               <h2>Hypothesis board</h2>
+              {interventionGate && !interventionApproved && (
+                <div className="interventionGate">
+                  <div className="ivGateHead">HUMAN APPROVAL REQUIRED · INTERVENTION GATED</div>
+                  <div className="ivGateDesc">{interventionGate.description}</div>
+                  {interventionGate.safety_envelope && (
+                    <div className="ivEnv">
+                      safety envelope · max {interventionGate.safety_envelope.max_traffic_pct}% traffic ·
+                      bounded {interventionGate.safety_envelope.max_duration_s}s ·
+                      auto-revert {String(interventionGate.safety_envelope.auto_revert)}
+                    </div>
+                  )}
+                  <div className="ivReason">
+                    Observation VoI has stagnated — passive checks cannot resolve this. A bounded
+                    causal test is the highest-value next action. Nothing happens until you approve.
+                  </div>
+                  <button className="approveBtn" onClick={approveIntervention}>
+                    ✓ Approve intervention & execute
+                  </button>
+                </div>
+              )}
+              {interventionApproved && interventionResult && (
+                <div className="interventionResult">
+                  <div className="ivResultHead">✓ INTERVENTION EXECUTED · {interventionResult.intervention_id}</div>
+                  <div className="ivResultSummary">{interventionResult.summary}</div>
+                  <div className="ivResultHash">sha256 {interventionResult.hash}…</div>
+                </div>
+              )}
               {ranked.map((h) => (
                 <div key={h.id} className={`hyp ${h.eliminated ? "dead" : ""} ${verdict?.root_cause_id === h.id && !h.eliminated ? "winner" : ""}`}>
                   <div className="hypTop">

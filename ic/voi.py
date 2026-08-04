@@ -36,18 +36,25 @@ INTERVENTION_RISK = 3.0  # with MU=1.0: voi ≈ eig − 3.0 → only ranks top w
                          # observation EIG is very low, which is the whole point
 
 
+INTERVENTION_ID = "I_traffic_shift"
+
+
 def _intervention_placeholder(max_obs_eig: float) -> CandidateAction:
+    """Emit the intervention as a candidate action every scoring pass. Whether it
+    is ACTUALLY executable in a given investigation is decided by the orchestrator,
+    which checks bundle.intervention_ids() — bundles that authored an intervention
+    outcome can run it; bundles that didn't get the honest 'would_fire' fallback."""
     eig = max(max_obs_eig * INTERVENTION_EIG_MULT, INTERVENTION_EIG_FLOOR)
     return CandidateAction(
-        action_id="traffic_shift_placeholder",
+        action_id=INTERVENTION_ID,
         kind=ActionKind.INTERVENTION,
-        description="Route 5% of traffic to prior deployment version (canary)",
-        measures=[],
+        description="Route 5% of traffic to prior deployment version (canary, bounded 60s, auto-revert)",
+        measures=["traffic_cohort_split"],
         eig=round(eig, 3),
         cost=INTERVENTION_COST,
         risk=INTERVENTION_RISK,
         voi_score=round(eig - LAMBDA * INTERVENTION_COST - MU * INTERVENTION_RISK, 3),
-        executable=False,  # CRITICAL — never executed in the prototype
+        executable=False,  # ranking-level flag; the orchestrator additionally gates
         unavailable_reason="not_available_in_prototype",
         safety_envelope={"max_traffic_pct": 5, "max_duration_s": 60, "auto_revert": True},
     )

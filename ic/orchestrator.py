@@ -18,7 +18,7 @@ from .agents.llm_lens import llm_contributions
 from .bundle import Bundle
 from .evidence_chain import seal
 from .llm import llm_enabled
-from .models import EvidenceItem, Hypothesis, Verdict
+from .models import EvidenceItem, Hypothesis, Probe, Verdict
 from .probe import select_probe
 from .reasoner import is_rollback_hypothesis
 from .voi import (STAGNATION_THRESHOLD, intervention_would_fire,
@@ -37,6 +37,7 @@ class RunResult:
     verdict: Verdict
     events: list[dict] = field(default_factory=list)
     probes_run: list[str] = field(default_factory=list)
+    interventions_run: list[str] = field(default_factory=list)
     time_to_conclusion_s: float = 0.0
     sealed: dict = field(default_factory=dict)
     cited_items: list[EvidenceItem] = field(default_factory=list)
@@ -115,7 +116,9 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
     # would "exhaust" before running a single probe. Time from here.
     probe_loop_t0 = time.time()
     probes_run: list[str] = []
+    interventions_run: list[str] = []
     already = set()
+    intervention_done = False
     voi_step = 0
     while True:
         # --- VoI overlay: decompose & rank every candidate next action -------
@@ -123,22 +126,77 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
         actions = score_actions(hyps, bundle.probe_catalog, already)
         _emit({"type": "voi_scored", "step": voi_step,
                "actions": [a.model_dump(mode="json") for a in actions]})
-        if observation_stagnated(actions):
+
+        stagnated = observation_stagnated(actions)
+        interv_action = next((a for a in actions if not a.executable), None)
+        # An intervention is EXECUTABLE for THIS incident only when the bundle
+        # authored an intervention_result for it (i.e., the safety envelope /
+        # simulation of causal outcome exists). Same simulation model as our probes.
+        interv_available = bool(
+            interv_action and probes_enabled and bundle.intervention_ids()
+            and interv_action.action_id in bundle.intervention_ids()
+        )
+
+        if stagnated:
             obs = [a for a in actions if a.executable]
             best_obs = max(obs, key=lambda a: a.eig, default=None)
-            interv = next((a for a in actions if not a.executable), None)
             _emit({"type": "voi_stagnation_detected",
                    "threshold": STAGNATION_THRESHOLD,
                    "best_observation": best_obs.action_id if best_obs else None,
                    "best_observation_eig": best_obs.eig if best_obs else 0.0,
-                   "intervention_eig": interv.eig if interv else None})
-        if intervention_would_fire(actions):
-            # Honest failure mode: we know what SHOULD happen next; we can't demo it.
-            interv = actions[0]
+                   "intervention_eig": interv_action.eig if interv_action else None,
+                   "intervention_available": interv_available})
+
+        # ---- Intervention execution path ---------------------------------
+        # Runs when: observation has stagnated, the bundle authored an
+        # intervention outcome, and we haven't already run one. The "execution"
+        # is against fixture data (same simulation model as probes); the human
+        # gate is emitted so the console can pause and require an Approve click.
+        if stagnated and interv_available and not intervention_done:
+            interv_id = interv_action.action_id
+            _emit({"type": "gate_pending", "action": "intervention",
+                   "intervention_id": interv_id,
+                   "description": interv_action.description,
+                   "safety_envelope": interv_action.safety_envelope,
+                   "note": "human approval required before intervention executes — "
+                           "console pauses here until Approve is clicked"})
+
+            item = bundle.run_intervention(interv_id, probes_enabled=True)
+            session.append(item)
+            resolvable.add(item.ref())
+            interventions_run.append(interv_id)
+            intervention_done = True
+
+            synth_probe = Probe(probe_id=interv_id, connector="intervention",
+                                measures=list(item.measures), cost_ms=0,
+                                load_class="read_light",
+                                description=interv_action.description)
+            outcomes = apply_probe_result(hyps, logits, synth_probe, item, session)
+            observed = dict.fromkeys(f"{o.observable}={o.observed}" for o in outcomes)
+            _emit({"type": "intervention_executed", "intervention_id": interv_id,
+                   "source_uri": item.source_uri, "hash": item.content_hash()[:12],
+                   "summary": "; ".join(observed)})
+            for o in outcomes:
+                h = next(h for h in hyps if h.id == o.hyp_id)
+                if o.matched and item.ref() not in h.evidence_refs:
+                    h.evidence_refs.append(item.ref())
+                _emit({"type": "posterior_updated", "id": o.hyp_id,
+                       "posterior": round(h.posterior, 3),
+                       "matched": o.matched, "observable": o.observable,
+                       "source": "intervention"})
+                if h.eliminated:
+                    _emit({"type": "hypothesis_eliminated", "id": h.id,
+                           "reason": h.eliminated_reason,
+                           "source": "intervention"})
+            continue  # re-score; loop will conclude next iteration
+
+        if intervention_would_fire(actions) and not interv_available:
+            # Honest failure mode: intervention is the argmax over all actions
+            # but this bundle didn't author an outcome → we can't execute.
             _emit({"type": "intervention_would_fire",
-                   "action_id": interv.action_id,
-                   "safety_envelope": interv.safety_envelope,
-                   "unavailable_reason": interv.unavailable_reason})
+                   "action_id": interv_action.action_id if interv_action else None,
+                   "safety_envelope": interv_action.safety_envelope if interv_action else None,
+                   "unavailable_reason": "not_available_in_prototype"})
 
         decision = decide(hyps, bundle.probe_catalog, already)
         if decision.action == "conclude":
@@ -201,9 +259,11 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
         hypotheses=hyps,
         probes_run=probes_run,
         evidence_refs=used_refs,
+        provenance="interventional" if interventions_run else "observational",
     )
 
-    _emit({"type": "provenance_labeled", "provenance": verdict.provenance})
+    _emit({"type": "provenance_labeled", "provenance": verdict.provenance,
+           "interventions_run": interventions_run})
 
     if rollback:
         _emit({"type": "gate_pending", "action": "rollback",
@@ -224,5 +284,6 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
            "leaf_count": len(used_items)})
 
     return RunResult(verdict=verdict, events=events, probes_run=probes_run,
+                     interventions_run=interventions_run,
                      time_to_conclusion_s=round(result_time, 3),
                      sealed=sealed, cited_items=used_items)

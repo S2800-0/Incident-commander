@@ -93,6 +93,33 @@ header { display: flex; justify-content: space-between; align-items: center;
 .rollback.yes { color: var(--amber); } .rollback.no { color: var(--dim); }
 .gated { color: var(--red); font-size: 12px; margin-top: 6px; }
 
+/* Intervention gate — the human-in-the-loop moment. Designed to STOP the eye. */
+.interventionGate { background: rgba(229,83,60,0.10); border: 2px solid var(--red);
+  border-radius: 10px; padding: 16px; margin-bottom: 12px;
+  animation: fade 0.5s ease, pulseborder 2.6s infinite; }
+@keyframes pulseborder {
+  0%,100% { box-shadow: 0 0 0 0 rgba(229,83,60,0.55); }
+  50%    { box-shadow: 0 0 0 6px rgba(229,83,60,0.0); }
+}
+.ivGateHead { color: var(--red); font-weight: 800; letter-spacing: 1.2px; font-size: 12px; }
+.ivGateDesc { color: var(--ink); font-size: 13px; margin-top: 8px; }
+.ivEnv { color: var(--amber); font-size: 11px; margin-top: 6px; font-family: ui-monospace; }
+.ivReason { color: var(--dim); font-size: 12px; margin-top: 10px; line-height: 1.5; }
+.approveBtn {
+  margin-top: 14px; width: 100%; padding: 14px 18px;
+  background: var(--red); color: #fff; border: none; border-radius: 8px;
+  font: 700 14px ui-monospace, monospace; letter-spacing: 0.8px; cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.approveBtn:hover { background: #ff6a4a; transform: translateY(-1px); }
+.approveBtn:active { transform: translateY(1px); }
+
+.interventionResult { background: rgba(57,217,138,0.08); border: 1px solid var(--green);
+  border-radius: 8px; padding: 12px; margin-bottom: 12px; animation: fade 0.6s ease; }
+.ivResultHead { color: var(--green); font-weight: 700; letter-spacing: 1px; font-size: 12px; }
+.ivResultSummary { margin: 6px 0; color: var(--ink); font-size: 13px; }
+.ivResultHash { color: var(--dim); font-size: 11px; font-family: ui-monospace; }
+
 .leaves { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 220px; overflow: auto; }
 .leaf { display: flex; gap: 10px; font-size: 12px; padding: 6px 8px; background: var(--panel2);
   border: 1px solid var(--line); border-radius: 6px; animation: fade 0.4s ease; }
