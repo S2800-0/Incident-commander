@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENTS, EvidenceLeaf, Hypothesis, ICEvent, Incident } from "./types";
 import MetricsPanel from "./MetricsPanel";
 
-type LaneLine = { t: number; text: string; kind: string };
+type LaneLine = { t: number; text: string; kind: string; hyp?: string };
 type Ambiguity = { margin: number; tau: number; reason?: string; resolvable: boolean; note?: string } | null;
 type ProbeSel = { probe_id: string; info_gain: number; cost_ms: number; description: string } | null;
 type ProbeRes = { probe_id: string; summary: string; hash: string; source_uri: string } | null;
@@ -15,10 +15,57 @@ type GatePending = { action: string; intervention_id?: string; description?: str
 type InterventionResult = { intervention_id: string; summary: string; hash: string } | null;
 
 const AGENT_LABEL: Record<string, string> = {
-  change_agent: "Change Agent",
-  telemetry_agent: "Telemetry Agent",
-  history_agent: "History Agent",
+  change_agent: "Change",
+  telemetry_agent: "Telemetry",
+  history_agent: "History",
 };
+const AGENT_ROLE: Record<string, string> = {
+  change_agent: "deploy-biased",
+  telemetry_agent: "signal-biased",
+  history_agent: "pattern-biased",
+};
+
+// ---- Inline SVG icons for the rail ----
+const IconInvestigations = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
+);
+const IconAblation = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="4" y1="20" x2="4" y2="10" /><line x1="10" y1="20" x2="10" y2="4" /><line x1="16" y1="20" x2="16" y2="14" /><line x1="22" y1="20" x2="22" y2="7" /></svg>
+);
+const IconBundles = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" /></svg>
+);
+const IconVerify = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><polyline points="9 12 11 14 15 10" /></svg>
+);
+const IconBell = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>
+);
+const IconHelp = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+);
+// Distinctive brand mark — a target reticle. Not letters.
+const BrandMark = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+    <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4" /><line x1="12" y1="1" x2="12" y2="5" />
+    <line x1="12" y1="19" x2="12" y2="23" /><line x1="1" y1="12" x2="5" y2="12" /><line x1="19" y1="12" x2="23" y2="12" />
+  </svg>
+);
+const IconPlay = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><polygon points="7,4 20,12 7,20" /></svg>
+);
+const IconClose = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+);
+
+type PanelKind = null | "bundles" | "verify" | "docs" | "about" | "alerts" | "user";
 
 export default function App() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -46,11 +93,11 @@ export default function App() {
   const [interventionGate, setInterventionGate] = useState<GatePending>(null);
   const [interventionApproved, setInterventionApproved] = useState(false);
   const [interventionResult, setInterventionResult] = useState<InterventionResult>(null);
+  const [panel, setPanel] = useState<PanelKind>(null);
+  const [query, setQuery] = useState<string>("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const startRef = useRef<number>(0);
-  // Events arriving while the intervention gate is open are buffered here so the
-  // console visibly pauses on "human approval required" — the click drains the queue.
   const gatePausedRef = useRef<boolean>(false);
   const queuedRef = useRef<ICEvent[]>([]);
 
@@ -59,6 +106,13 @@ export default function App() {
   }, []);
 
   const incident = incidents.find((i) => i.incident_id === sel);
+  const filteredIncidents = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return incidents;
+    return incidents.filter(
+      (i) => i.incident_id.toLowerCase().includes(q) || i.slice.toLowerCase().includes(q) || i.title.toLowerCase().includes(q)
+    );
+  }, [incidents, query]);
 
   function reset() {
     setLanes({}); setHyps({}); setOrder([]); setAmbiguity(null);
@@ -70,14 +124,14 @@ export default function App() {
     queuedRef.current = [];
   }
 
-  function addLeaf(uri: string, hash?: string, probe?: boolean) {
+  function addLeaf(uri: string, hash?: string, probe?: boolean, intervention?: boolean) {
     setLeaves((prev) => {
       const existing = prev.find((l) => l.uri === uri);
       if (existing) {
-        if (hash && !existing.hash) return prev.map((l) => (l.uri === uri ? { ...l, hash, probe } : l));
+        if (hash && !existing.hash) return prev.map((l) => (l.uri === uri ? { ...l, hash, probe, intervention } : l));
         return prev;
       }
-      return [...prev, { uri, hash: hash || "", probe: !!probe }];
+      return [...prev, { uri, hash: hash || "", probe: !!probe, intervention: !!intervention }];
     });
   }
 
@@ -89,9 +143,9 @@ export default function App() {
         break;
       case "agent_reasoned": {
         const line: LaneLine = {
-          t,
-          kind: "reason",
+          t, kind: "reason",
           text: `${e.hyp_id}  ${e.delta >= 0 ? "+" : ""}${e.delta}  ${e.rationale}`,
+          hyp: e.hyp_id,
         };
         setLanes((p) => ({ ...p, [e.agent_id]: [...(p[e.agent_id] || []), line] }));
         (e.evidence_refs || []).forEach((r: string) => addLeaf(r));
@@ -138,22 +192,22 @@ export default function App() {
         break;
       case "gate_pending":
         if (e.action === "intervention") {
-          // PAUSE — the human must click Approve before subsequent events render.
           setInterventionGate({ action: e.action, intervention_id: e.intervention_id, description: e.description, safety_envelope: e.safety_envelope, note: e.note });
           gatePausedRef.current = true;
         } else {
-          setGate(e); // rollback gate — informational, doesn't pause
+          setGate(e);
         }
         break;
       case "intervention_executed":
         setInterventionResult({ intervention_id: e.intervention_id, summary: e.summary, hash: e.hash });
-        addLeaf(e.source_uri, e.hash, true);
-        break;
-      case "gate_pending":
-        setGate(e);
+        addLeaf(e.source_uri, e.hash, false, true);
         break;
       case "verdict":
-        setVerdict({ root_cause_id: e.root_cause_id, summary: e.summary, posterior: e.posterior, rollback_recommended: e.rollback_recommended, probes_run: e.probes_run });
+        setVerdict({
+          root_cause_id: e.root_cause_id, summary: e.summary,
+          posterior: e.posterior, rollback_recommended: e.rollback_recommended,
+          probes_run: e.probes_run,
+        });
         break;
       case "chain_sealed":
         setSealed({ merkle_root: e.merkle_root, signature: e.signature, leaf_count: e.leaf_count });
@@ -164,8 +218,6 @@ export default function App() {
     }
   }
 
-  // Buffer events that arrive while the intervention gate is open — they render
-  // only after the user clicks Approve.
   function dispatch(e: ICEvent) {
     if (gatePausedRef.current && e.type !== "gate_pending") {
       queuedRef.current.push(e);
@@ -179,7 +231,6 @@ export default function App() {
     setInterventionApproved(true);
     const queued = queuedRef.current;
     queuedRef.current = [];
-    // Drain with light pacing so the collapse still reads as a sequence, not a jump.
     queued.forEach((e, i) => setTimeout(() => handle(e), i * 320));
   }
 
@@ -203,231 +254,465 @@ export default function App() {
 
   return (
     <div className="app">
-      <header>
-        <div className="brand">
-          <span className="dot" /> INCIDENT COMMANDER
-          <span className="tagline">active differential diagnosis</span>
-        </div>
-        <div className="tabs">
-          <button className={tab === "console" ? "on" : ""} onClick={() => setTab("console")}>Console</button>
-          <button className={tab === "metrics" ? "on" : ""} onClick={() => setTab("metrics")}>Ablation &amp; Calibration</button>
-        </div>
-      </header>
+      {/* ==================== LEFT RAIL ==================== */}
+      <aside className="rail">
+        <div className="railLogo"><BrandMark /></div>
+        <button className={`railBtn ${tab === "console" ? "on" : ""}`} onClick={() => setTab("console")}>
+          <IconInvestigations />
+          <span className="railTip">Investigations</span>
+        </button>
+        <button className={`railBtn ${tab === "metrics" ? "on" : ""}`} onClick={() => setTab("metrics")}>
+          <IconAblation />
+          <span className="railTip">Ablation &amp; Calibration</span>
+        </button>
+        <button className={`railBtn ${panel === "bundles" ? "on" : ""}`} onClick={() => setPanel(panel === "bundles" ? null : "bundles")}>
+          <IconBundles />
+          <span className="railTip">Incident Bundles</span>
+        </button>
+        <button className={`railBtn ${panel === "verify" ? "on" : ""}`} onClick={() => setPanel(panel === "verify" ? null : "verify")}>
+          <IconVerify />
+          <span className="railTip">Offline Verifier</span>
+        </button>
+        <div className="railSpacer" />
+        <button className={`railBtn ${panel === "docs" ? "on" : ""}`} onClick={() => setPanel(panel === "docs" ? null : "docs")}>
+          <IconHelp />
+          <span className="railTip">Documentation</span>
+        </button>
+      </aside>
 
-      {tab === "metrics" ? (
-        <MetricsPanel />
-      ) : (
-        <>
-          <div className="controls">
-            <select value={sel} onChange={(e) => setSel(e.target.value)} disabled={running}>
-              {incidents.map((i) => (
-                <option key={i.incident_id} value={i.incident_id}>
-                  {i.incident_id} · {i.slice} · {i.title.slice(0, 46)}…
-                </option>
-              ))}
-            </select>
-            <label className="chk"><input type="checkbox" checked={probesOn} onChange={(e) => setProbesOn(e.target.checked)} disabled={running} /> probes</label>
-            <label className="chk"><input type="checkbox" checked={replay} onChange={(e) => setReplay(e.target.checked)} disabled={running} /> replay</label>
-            <button className="run" onClick={start} disabled={running || !incident}>{running ? "investigating…" : "▶ Investigate"}</button>
-            {incident && <span className="truth">ground truth · {incident.ground_truth.root_cause_id} · rollback {String(incident.ground_truth.rollback_correct)}</span>}
+      {/* ==================== WORKSPACE ==================== */}
+      <div className="workspace">
+        {/* Top header */}
+        <header className="topbar">
+          <div className="brand">
+            <span className="brandMark"><BrandMark /></span>
+            <span className="brandName">Incident Commander</span>
+            <span className="brandDivider">|</span>
+            <span className="appName">VoI Investigation Console</span>
           </div>
+          <div className="topSpacer" />
+          <div className="topActions">
+            <input
+              type="search" className="topSearch" placeholder="Search incidents by id, slice, or title…"
+              value={query} onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => setPanel("bundles")}
+            />
+            <button className="topIcon" title="Notifications" onClick={() => setPanel(panel === "alerts" ? null : "alerts")}>
+              <IconBell />
+              <span className="topBadge">3</span>
+            </button>
+            <div className="avatar" title="Signed in" onClick={() => setPanel(panel === "user" ? null : "user")} style={{ cursor: "pointer" }}>S</div>
+          </div>
+        </header>
 
-          <div className="grid">
-            {/* PANE 1 — agent lanes */}
-            <section className="pane lanes">
-              <h2>Agent lanes</h2>
-              <div className="laneRow">
-                {AGENTS.map((a) => (
-                  <div key={a} className="lane">
-                    <div className="laneHead">{AGENT_LABEL[a]}</div>
-                    <div className="laneBody">
-                      {(lanes[a] || []).map((l, i) => (
-                        <div key={i} className="laneLine">
-                          <span className="ms">{l.t}ms</span> {l.text}
-                        </div>
-                      ))}
-                      {!(lanes[a] || []).length && <div className="idle">idle</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
+        {/* Tabs */}
+        <nav className="tabs">
+          <button className={`tab ${tab === "console" ? "on" : ""}`} onClick={() => setTab("console")}>Console</button>
+          <button className={`tab ${tab === "metrics" ? "on" : ""}`} onClick={() => setTab("metrics")}>Ablation &amp; Calibration</button>
+        </nav>
 
-            {/* PANE 3 — probe ticker (given prominence: it's the wow) */}
-            <section className="pane ticker">
-              <h2>Probe selection</h2>
-              {!ambiguity && <div className="idle">awaiting adjudication…</div>}
-              {ambiguity && (
-                <div className={`ambiguity ${ambiguity.resolvable ? "" : "blocked"}`}>
-                  <div className="banner">
-                    Hypotheses within <b>{ambiguity.margin.toFixed(3)}</b> (τ={ambiguity.tau})
-                    {ambiguity.resolvable ? " — selecting discriminating probe…" : " — probes OFF, cannot resolve"}
-                  </div>
-                  {ambiguity.reason && <div className="why">{ambiguity.reason}</div>}
-                  {ambiguity.note && <div className="why">{ambiguity.note}</div>}
-                </div>
-              )}
-              {probeSel && (
-                <div className="probeCard">
-                  <div className="pid">{probeSel.probe_id}</div>
-                  <div className="pdesc">{probeSel.description}</div>
-                  <div className="pmeta">
-                    <span className="gain">info-gain {probeSel.info_gain}</span>
-                    <span>{probeSel.cost_ms} ms</span>
-                  </div>
-                </div>
-              )}
-              {probeRes && (
-                <div className="probeRes">
-                  <div className="prLabel">probe returned</div>
-                  <div className="prSummary">{probeRes.summary}</div>
-                  <div className="prHash">sha256 {probeRes.hash}…</div>
-                </div>
-              )}
-              {exhausted && (
-                <div className="exhausted">
-                  budget exhausted — surviving {exhausted.surviving?.join(", ")}; would run next: <b>{exhausted.would_run_next}</b>
-                </div>
-              )}
-            </section>
+        {/* Breadcrumb */}
+        <div className="breadcrumb">
+          <span>Home</span>
+          <span className="crumbSep">/</span>
+          <span>{tab === "metrics" ? "Ablation" : "Investigations"}</span>
+          {tab === "console" && (
+            <>
+              <span className="crumbSep">/</span>
+              <b>{sel}</b>
+              {incident && <span className="crumbSlice">{incident.slice}</span>}
+            </>
+          )}
+        </div>
 
-            {/* PANE 2 — hypothesis board */}
-            <section className="pane board">
-              <h2>Hypothesis board</h2>
-              {interventionGate && !interventionApproved && (
-                <div className="interventionGate">
-                  <div className="ivGateHead">HUMAN APPROVAL REQUIRED · INTERVENTION GATED</div>
-                  <div className="ivGateDesc">{interventionGate.description}</div>
-                  {interventionGate.safety_envelope && (
-                    <div className="ivEnv">
-                      safety envelope · max {interventionGate.safety_envelope.max_traffic_pct}% traffic ·
-                      bounded {interventionGate.safety_envelope.max_duration_s}s ·
-                      auto-revert {String(interventionGate.safety_envelope.auto_revert)}
-                    </div>
-                  )}
-                  <div className="ivReason">
-                    Observation VoI has stagnated — passive checks cannot resolve this. A bounded
-                    causal test is the highest-value next action. Nothing happens until you approve.
-                  </div>
-                  <button className="approveBtn" onClick={approveIntervention}>
-                    ✓ Approve intervention & execute
-                  </button>
-                </div>
-              )}
-              {interventionApproved && interventionResult && (
-                <div className="interventionResult">
-                  <div className="ivResultHead">✓ INTERVENTION EXECUTED · {interventionResult.intervention_id}</div>
-                  <div className="ivResultSummary">{interventionResult.summary}</div>
-                  <div className="ivResultHash">sha256 {interventionResult.hash}…</div>
-                </div>
-              )}
-              {ranked.map((h) => (
-                <div key={h.id} className={`hyp ${h.eliminated ? "dead" : ""} ${verdict?.root_cause_id === h.id && !h.eliminated ? "winner" : ""}`}>
-                  <div className="hypTop">
-                    <span className="hid">{h.id}</span>
-                    <span className="owner">{AGENT_LABEL[h.agent_id] || h.agent_id}</span>
-                    <span className="pct">{(h.posterior * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="claim">{h.claim}</div>
-                  <div className="bar"><div className="fill" style={{ width: `${h.posterior * 100}%` }} /></div>
-                  {h.eliminated && <div className="elim">✕ {h.eliminated_reason}</div>}
-                  {!!h.evidence_refs.length && <div className="refs">{h.evidence_refs.map((r) => r.split("//").pop()).join(" · ")}</div>}
-                </div>
-              ))}
-              {verdict && (
-                <div className="verdict">
-                  <div className="vhead">VERDICT — {verdict.root_cause_id} @ {(verdict.posterior * 100).toFixed(0)}%</div>
-                  <div className="vsum">{verdict.summary}</div>
-                  <div className={`rollback ${verdict.rollback_recommended ? "yes" : "no"}`}>
-                    rollback {verdict.rollback_recommended ? "RECOMMENDED" : "not recommended"}
-                  </div>
-                  {provenance && (
-                    <div className={`provenance ${interventionWouldFire ? "wouldbe" : ""}`}>
-                      Provenance: {interventionWouldFire ? "interventional (would-be)" : provenance}
-                    </div>
-                  )}
-                  {gate && <div className="gated">⛔ {gate.action} gated — awaiting explicit approval (never auto-fired)</div>}
-                </div>
-              )}
-            </section>
-
-            {/* PANE 5 — VoI Stagnation Panel (framing overlay: explains WHY the chosen
-                action was chosen, incl. why the intervention would fire if executable) */}
-            <section className="pane voi">
-              <h2>VoI · Value of the Next Action</h2>
-              {!voi && <div className="idle">awaiting action scoring…</div>}
-              {voi && (() => {
-                const obs = voi.actions.filter((a) => a.kind === "observation");
-                const interv = voi.actions.find((a) => a.kind === "intervention");
-                const maxEig = Math.max(1, ...voi.actions.map((a) => a.eig));
-                const argmax = voi.actions.find((a) => a.executable);
-                return (
-                  <>
-                    {stagnation && (
-                      <div className="stagBanner">
-                        Observation VoI collapsed → probing is the last productive step in this loop.
-                      </div>
-                    )}
-                    {interventionWouldFire && (
-                      <div className="stagBanner fire">
-                        Observation exhausted. Intervention would be selected — traffic_shift at 5%, 60s bound. Phase 2 executes; Phase 1 explains.
-                      </div>
-                    )}
-                    {obs.map((a) => (
-                      <div key={a.action_id} className={`voiRow ${stagnation ? "stagnated" : ""}`}>
-                        <span className="voiLabel">{a.action_id}</span>
-                        <div className="voiBar"><div className="voiFill obs" style={{ width: `${Math.max(2, (a.eig / maxEig) * 100)}%` }} /></div>
-                        <span className="voiNum">EIG {a.eig.toFixed(2)}</span>
-                      </div>
-                    ))}
-                    {interv && (
-                      <div className="voiRow">
-                        <span className="voiLabel iv" title="Traffic-shift primitive (5% canary, 60s bound, auto-revert). Specified in our research design (Section 5). Not executed in prototype — see Phase 2.">
-                          {interv.action_id.replace("_placeholder", "")} (not executable) ⓘ
-                        </span>
-                        <div className="voiBar"><div className="voiFill iv" style={{ width: `${Math.max(2, (interv.eig / maxEig) * 100)}%` }} /></div>
-                        <span className="voiNum">EIG {interv.eig.toFixed(2)}</span>
-                      </div>
-                    )}
-                    <div className="voiArgmax">
-                      {verdict
-                        ? `Concluded — remaining observation VoI (${obs.length ? Math.max(...obs.map((a) => a.voi_score)).toFixed(2) : "0"}) below margin need`
-                        : `Argmax → ${argmax ? `run probe ${argmax.action_id}` : "no executable action — conclude"}`}
-                      <span className="voiFormula">  voi = eig − λ·cost − μ·risk  (λ=0.05, μ=1.0)</span>
-                    </div>
-                  </>
-                );
-              })()}
-            </section>
-
-            {/* PANE 4 — evidence chain */}
-            <section className="pane chain">
-              <h2>Evidence chain</h2>
-              <div className="leaves">
-                {leaves.map((l, i) => (
-                  <div key={i} className={`leaf ${l.probe ? "probe" : ""}`}>
-                    <span className="lhash">{l.hash ? l.hash.slice(0, 12) : "prior"}</span>
-                    <span className="luri">{l.uri.split("//").pop()}</span>
-                  </div>
-                ))}
-                {!leaves.length && <div className="idle">no evidence cited yet</div>}
-              </div>
-              <div className={`seal ${sealed ? "sealed" : ""}`}>
-                {sealed ? (
-                  <>
-                    <div className="sealStamp">✓ SEALED · {sealed.leaf_count} leaves</div>
-                    <div className="root">merkle {sealed.merkle_root.slice(0, 24)}…</div>
-                    <div className="sig">ed25519 {sealed.signature}</div>
-                  </>
-                ) : (
-                  <div className="idle">chain open — computes root on verdict</div>
+        {/* Content */}
+        <main className="content">
+          {tab === "metrics" ? <MetricsPanel /> : (
+            <>
+              <div className="controls">
+                <select value={sel} onChange={(e) => setSel(e.target.value)} disabled={running}>
+                  {incidents.map((i) => (
+                    <option key={i.incident_id} value={i.incident_id}>
+                      {i.incident_id} · {i.slice} · {i.title.slice(0, 60)}…
+                    </option>
+                  ))}
+                </select>
+                <label className="chk"><input type="checkbox" checked={probesOn} onChange={(e) => setProbesOn(e.target.checked)} disabled={running} /> probes</label>
+                <label className="chk"><input type="checkbox" checked={replay} onChange={(e) => setReplay(e.target.checked)} disabled={running} /> replay</label>
+                <button className="btn primary btnInvestigate" onClick={start} disabled={running || !incident}>
+                  <IconPlay />
+                  <span>{running ? "Investigating…" : "Investigate"}</span>
+                </button>
+                {incident && (
+                  <span className="truth">
+                    <span className="dot" style={{ background: "var(--cisco-status-major)" }} />
+                    ground truth · <b>{incident.ground_truth.root_cause_id}</b> · rollback {String(incident.ground_truth.rollback_correct)}
+                  </span>
                 )}
               </div>
-            </section>
+
+              <div className="grid">
+                {/* Agent lanes */}
+                <section className="card lanes">
+                  <h2>Agent Lanes</h2>
+                  <div className="body">
+                    <div className="laneRow">
+                      {AGENTS.map((a) => (
+                        <div key={a} className="lane">
+                          <div className="laneHead">
+                            <span>{AGENT_LABEL[a]}</span>
+                            <span className="role">{AGENT_ROLE[a]}</span>
+                          </div>
+                          <div className="laneBody">
+                            {(lanes[a] || []).map((l, i) => (
+                              <div key={i} className="laneLine">
+                                <span className="ms">{l.t}ms</span>{" "}
+                                {l.hyp && <span className="laneLineTag">{l.hyp}</span>}{" "}
+                                {l.text.replace(new RegExp(`^${l.hyp}\\s+`), "")}
+                              </div>
+                            ))}
+                            {!(lanes[a] || []).length && <div className="idle">idle</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+
+                {/* Probe ticker */}
+                <section className="card ticker">
+                  <h2>Probe Selection</h2>
+                  <div className="body">
+                    {!ambiguity && <div className="idle">awaiting adjudication…</div>}
+                    {ambiguity && (
+                      <div className={`ambiguity ${ambiguity.resolvable ? "" : "blocked"}`}>
+                        <div className="banner">
+                          Hypotheses within <b>{ambiguity.margin.toFixed(3)}</b> (τ={ambiguity.tau})
+                          {ambiguity.resolvable ? " — selecting discriminating probe…" : " — probes OFF, cannot resolve"}
+                        </div>
+                        {ambiguity.reason && <div className="why">{ambiguity.reason}</div>}
+                        {ambiguity.note && <div className="why">{ambiguity.note}</div>}
+                      </div>
+                    )}
+                    {probeSel && (
+                      <div className="probeCard">
+                        <div className="pid">{probeSel.probe_id}</div>
+                        <div className="pdesc">{probeSel.description}</div>
+                        <div className="pmeta">
+                          <span className="gain">info-gain {probeSel.info_gain}</span>
+                          <span>{probeSel.cost_ms} ms</span>
+                        </div>
+                      </div>
+                    )}
+                    {probeRes && (
+                      <div className="probeRes">
+                        <div className="prLabel">probe returned</div>
+                        <div className="prSummary">{probeRes.summary}</div>
+                        <div className="prHash">sha256 {probeRes.hash}…</div>
+                      </div>
+                    )}
+                    {exhausted && (
+                      <div className="exhausted">
+                        budget exhausted — surviving {exhausted.surviving?.join(", ")}; would run next: <b>{exhausted.would_run_next}</b>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Hypothesis board */}
+                <section className="card board">
+                  <h2>Hypothesis Board</h2>
+                  <div className="body">
+                    {interventionGate && !interventionApproved && (
+                      <div className="interventionGate">
+                        <div className="ivGateHead">
+                          <span className="dot" style={{ background: "var(--cisco-status-critical)" }} />
+                          Human Approval Required · Intervention Gated
+                        </div>
+                        <div className="ivGateDesc">{interventionGate.description}</div>
+                        {interventionGate.safety_envelope && (
+                          <div className="ivEnv">
+                            Safety envelope · max {interventionGate.safety_envelope.max_traffic_pct}% traffic ·
+                            bounded {interventionGate.safety_envelope.max_duration_s}s ·
+                            auto-revert {String(interventionGate.safety_envelope.auto_revert)}
+                          </div>
+                        )}
+                        <div className="ivReason">
+                          Observation VoI has stagnated — passive checks cannot resolve this. A bounded
+                          causal test is the highest-value next action. Nothing happens until you approve.
+                        </div>
+                        <button className="approveBtn" onClick={approveIntervention}>
+                          ✓ Approve intervention &amp; execute
+                        </button>
+                      </div>
+                    )}
+                    {interventionApproved && interventionResult && (
+                      <div className="interventionResult">
+                        <div className="ivResultHead">✓ Intervention Executed · {interventionResult.intervention_id}</div>
+                        <div className="ivResultSummary">{interventionResult.summary}</div>
+                        <div className="ivResultHash">sha256 {interventionResult.hash}…</div>
+                      </div>
+                    )}
+                    {ranked.map((h) => (
+                      <div key={h.id} className={`hyp ${h.eliminated ? "dead" : ""} ${verdict?.root_cause_id === h.id && !h.eliminated ? "winner" : ""}`}>
+                        <div className="hypTop">
+                          <span className="hid">{h.id}</span>
+                          <span className="owner">{AGENT_LABEL[h.agent_id] || h.agent_id}</span>
+                          {verdict?.root_cause_id === h.id && !h.eliminated && (
+                            <span className="pill pill-healthy"><span className="dot" style={{ background: "var(--cisco-status-healthy)" }} />winner</span>
+                          )}
+                          {h.eliminated && (
+                            <span className="pill pill-critical"><span className="dot" style={{ background: "var(--cisco-status-critical)" }} />eliminated</span>
+                          )}
+                          <span className="pct">{(h.posterior * 100).toFixed(0)}%</span>
+                        </div>
+                        <div className="claim">{h.claim}</div>
+                        <div className="bar"><div className="fill" style={{ width: `${h.posterior * 100}%` }} /></div>
+                        {h.eliminated && <div className="elim">✕ {h.eliminated_reason}</div>}
+                        {!!h.evidence_refs.length && <div className="refs">{h.evidence_refs.map((r) => r.split("//").pop()).join(" · ")}</div>}
+                      </div>
+                    ))}
+                    {verdict && (
+                      <div className="verdict">
+                        <div className="vhead">Verdict · {verdict.root_cause_id} @ {(verdict.posterior * 100).toFixed(0)}%</div>
+                        <div className="vsum">{verdict.summary}</div>
+                        <div className={`rollback ${verdict.rollback_recommended ? "yes" : "no"}`}>
+                          rollback {verdict.rollback_recommended ? "recommended" : "not recommended"}
+                        </div>
+                        {provenance && (
+                          <div className={`provenance ${interventionWouldFire ? "wouldbe" : ""}`}>
+                            Provenance: {interventionWouldFire ? "interventional (would-be)" : provenance}
+                          </div>
+                        )}
+                        {gate && <div className="gated">⛔ {gate.action} gated — awaiting explicit approval (never auto-fired)</div>}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Evidence chain */}
+                <section className="card chain">
+                  <h2>Evidence Chain</h2>
+                  <div className="body">
+                    <div className="leaves">
+                      {leaves.map((l, i) => (
+                        <div key={i} className={`leaf ${l.probe ? "probe" : ""} ${l.intervention ? "intervention" : ""}`}>
+                          <span className="lhash">{l.hash ? l.hash.slice(0, 12) : "prior"}</span>
+                          <span className="luri">{l.uri.split("//").pop()}</span>
+                          {l.intervention && <span className="pill pill-critical">interventional</span>}
+                          {l.probe && !l.intervention && <span className="pill pill-info">probe</span>}
+                          {!l.probe && !l.intervention && <span className="pill pill-neutral">prior</span>}
+                        </div>
+                      ))}
+                      {!leaves.length && <div className="idle">no evidence cited yet</div>}
+                    </div>
+                    <div className={`seal ${sealed ? "sealed" : ""}`}>
+                      {sealed ? (
+                        <>
+                          <div className="sealStamp">✓ Sealed · {sealed.leaf_count} leaves</div>
+                          <div className="root">merkle {sealed.merkle_root.slice(0, 32)}…</div>
+                          <div className="sig">ed25519 {sealed.signature}</div>
+                        </>
+                      ) : (
+                        <div>chain open — computes root on verdict</div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                {/* VoI panel */}
+                <section className="card voi">
+                  <h2>VoI · Value of the Next Action</h2>
+                  <div className="body">
+                    {!voi && <div className="idle">awaiting action scoring…</div>}
+                    {voi && (() => {
+                      const obs = voi.actions.filter((a) => a.kind === "observation");
+                      const interv = voi.actions.find((a) => a.kind === "intervention");
+                      const maxEig = Math.max(1, ...voi.actions.map((a) => a.eig));
+                      const argmax = voi.actions.find((a) => a.executable);
+                      return (
+                        <>
+                          {stagnation && (
+                            <div className="stagBanner">
+                              Observation VoI collapsed → probing is the last productive step in this loop.
+                            </div>
+                          )}
+                          {interventionWouldFire && (
+                            <div className="stagBanner fire">
+                              Observation exhausted. Intervention would be selected — traffic_shift at 5%, 60s bound. Phase 2 executes; Phase 1 explains.
+                            </div>
+                          )}
+                          {obs.map((a) => (
+                            <div key={a.action_id} className={`voiRow ${stagnation ? "stagnated" : ""}`}>
+                              <span className="voiLabel">{a.action_id}</span>
+                              <div className="voiBar"><div className="voiFill obs" style={{ width: `${Math.max(2, (a.eig / maxEig) * 100)}%` }} /></div>
+                              <span className="voiNum">EIG {a.eig.toFixed(2)}</span>
+                            </div>
+                          ))}
+                          {interv && (
+                            <div className="voiRow">
+                              <span className="voiLabel iv" title="Traffic-shift primitive (5% canary, 60s bound, auto-revert). Specified in our research design (Section 5). Not executed in prototype — see Phase 2.">
+                                {interv.action_id.replace("_placeholder", "")} (gated) ⓘ
+                              </span>
+                              <div className="voiBar"><div className="voiFill iv" style={{ width: `${Math.max(2, (interv.eig / maxEig) * 100)}%` }} /></div>
+                              <span className="voiNum">EIG {interv.eig.toFixed(2)}</span>
+                            </div>
+                          )}
+                          <div className="voiArgmax">
+                            {verdict
+                              ? `Concluded — remaining observation VoI (${obs.length ? Math.max(...obs.map((a) => a.voi_score)).toFixed(2) : "0"}) below margin need`
+                              : `Argmax → ${argmax ? `run probe ${argmax.action_id}` : "no executable action — conclude"}`}
+                            <span className="voiFormula">voi = eig − λ·cost − μ·risk (λ=0.05, μ=1.0)</span>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
+          <div className="footer">
+            local corpus · local server · offline verifier — <code>python verify.py postmortem.json</code>
           </div>
-        </>
+        </main>
+      </div>
+
+      {/* ==================== Modals & dropdowns ==================== */}
+      {panel && (
+        <div className="modalOverlay" onClick={() => { setPanel(null); setQuery(""); }}>
+          <div className={`modalCard ${panel === "alerts" || panel === "user" ? "dropdownCard" : ""}`} onClick={(e) => e.stopPropagation()}>
+            <div className="modalHead">
+              <div className="modalTitle">{
+                panel === "bundles" ? "Incident Bundles" :
+                panel === "verify"  ? "Offline Evidence Verifier" :
+                panel === "docs"    ? "Documentation" :
+                panel === "alerts"  ? "Recent Alerts" :
+                panel === "user"    ? "Account" :
+                panel === "about"   ? "About Incident Commander" : ""
+              }</div>
+              <button className="modalClose" onClick={() => { setPanel(null); setQuery(""); }}><IconClose /></button>
+            </div>
+            <div className="modalBody">
+              {panel === "bundles" && (
+                <>
+                  <input
+                    type="search" className="modalSearch" placeholder="Filter by id, slice, or title…"
+                    value={query} onChange={(e) => setQuery(e.target.value)} autoFocus
+                  />
+                  <div className="bundleList">
+                    {filteredIncidents.length === 0 && <div className="idle">no incidents match “{query}”</div>}
+                    {filteredIncidents.map((i) => (
+                      <button key={i.incident_id} className={`bundleRow ${sel === i.incident_id ? "on" : ""}`}
+                        onClick={() => { setSel(i.incident_id); setPanel(null); setQuery(""); }}>
+                        <div className="bundleTop">
+                          <span className="hid">{i.incident_id}</span>
+                          <span className={`pill pill-${i.slice === "ambiguous" ? "major" : i.slice === "adversarial_redherring" ? "critical" : "info"}`}>{i.slice}</span>
+                        </div>
+                        <div className="bundleTitle">{i.title}</div>
+                        <div className="bundleFoot">
+                          truth · <b>{i.ground_truth.root_cause_id}</b> · rollback {String(i.ground_truth.rollback_correct)}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              {panel === "verify" && (
+                <>
+                  <p className="modalText">
+                    Every verdict is Merkle-rooted over its cited evidence and Ed25519-signed. Any postmortem can be
+                    checked <b>fully offline</b> — no network, no server — with the standalone <code>verify.py</code> tool.
+                    Change one byte of any evidence item and the verifier prints TAMPERED.
+                  </p>
+                  <div className="codeBlock">
+                    <div className="codeLine"><span className="codeComment"># 1. Run an investigation and seal its postmortem</span></div>
+                    <div className="codeLine">python -m ic.investigate INC-4471 -o postmortem.json</div>
+                    <div className="codeLine">&nbsp;</div>
+                    <div className="codeLine"><span className="codeComment"># 2. Verify offline — returns exit code 0 on success</span></div>
+                    <div className="codeLine">python verify.py postmortem.json</div>
+                    <div className="codeLine"><span className="codeComment">→ VERIFIED ✅</span></div>
+                  </div>
+                  <p className="modalTextSmall">
+                    Threat model: post-hoc modification of the reasoning trace by any party after the investigation
+                    closes. Relevant to regulated or compliance-sensitive environments.
+                  </p>
+                </>
+              )}
+              {panel === "docs" && (
+                <div className="docList">
+                  <a className="docItem" href="https://github.com/S2800-0/Incident-commander/blob/main/README.md" target="_blank" rel="noreferrer">
+                    <div className="docTitle">README.md</div>
+                    <div className="docDesc">Quickstart, VoI framing, ablation methodology, evidence chain overview.</div>
+                  </a>
+                  <a className="docItem" href="https://github.com/S2800-0/Incident-commander/blob/main/docs/AUTHORING_GUIDE.md" target="_blank" rel="noreferrer">
+                    <div className="docTitle">docs/AUTHORING_GUIDE.md</div>
+                    <div className="docDesc">How to author a new incident bundle from a real postmortem — schema, invariant, three interpreter types, debug tree.</div>
+                  </a>
+                  <a className="docItem" href="https://github.com/S2800-0/Incident-commander/blob/main/schema/incident_bundle.schema.md" target="_blank" rel="noreferrer">
+                    <div className="docTitle">schema/incident_bundle.schema.md</div>
+                    <div className="docDesc">Bundle schema, evidence tiers, the one invariant that makes the ablation meaningful.</div>
+                  </a>
+                </div>
+              )}
+              {panel === "alerts" && (
+                <div className="alertList">
+                  <div className="alertItem">
+                    <span className="dot" style={{ background: "var(--cisco-status-critical)" }} />
+                    <div className="alertBody">
+                      <div className="alertTitle">INC-4478 · human approval required</div>
+                      <div className="alertMeta">Observation stagnated · intervention gated · 2m ago</div>
+                    </div>
+                  </div>
+                  <div className="alertItem">
+                    <span className="dot" style={{ background: "var(--cisco-status-major)" }} />
+                    <div className="alertBody">
+                      <div className="alertTitle">INC-4472 · rollback recommendation contested</div>
+                      <div className="alertMeta">Sibling probe fired · 7m ago</div>
+                    </div>
+                  </div>
+                  <div className="alertItem">
+                    <span className="dot" style={{ background: "var(--cisco-status-healthy)" }} />
+                    <div className="alertBody">
+                      <div className="alertTitle">INC-4471 · verdict sealed</div>
+                      <div className="alertMeta">H1 @ 94% · postmortem VERIFIED · 12m ago</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {panel === "user" && (
+                <div className="userList">
+                  <div className="userInfo">
+                    <div className="avatar" style={{ width: 44, height: 44, fontSize: 16 }}>S</div>
+                    <div>
+                      <div className="userName">Shahesta Mohamed</div>
+                      <div className="userMeta">Independent Researcher · shahesta0028@gmail.com</div>
+                    </div>
+                  </div>
+                  <button className="userAction" onClick={() => { setPanel("about"); }}>About Incident Commander</button>
+                  <a className="userAction" href="https://github.com/S2800-0/Incident-commander" target="_blank" rel="noreferrer">GitHub repository</a>
+                  <button className="userAction danger">Sign out</button>
+                </div>
+              )}
+              {panel === "about" && (
+                <>
+                  <p className="modalText">
+                    <b>Incident Commander</b> is a Value-of-Information–guided incident investigator. It treats
+                    every candidate next action — an additional observation or a bounded canary intervention —
+                    as an action with a computable expected information gain, cost, and risk. It stops observing
+                    when observation stagnates, and only then surfaces a human-gated causal test.
+                  </p>
+                  <div className="aboutMeta">
+                    <div><b>Version</b><span>0.4.0 · Cisco UI</span></div>
+                    <div><b>Authors</b><span>Nourseen Tarek · Shahesta Mohamed</span></div>
+                    <div><b>License</b><span>Research prototype</span></div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
-      <footer>local corpus · local server · offline verifier — <code>python verify.py postmortem.json</code></footer>
     </div>
   );
 }

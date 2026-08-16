@@ -24,7 +24,7 @@ export type Hypothesis = {
   evidence_refs: string[];
 };
 
-export type EvidenceLeaf = { uri: string; hash: string; probe?: boolean };
+export type EvidenceLeaf = { uri: string; hash: string; probe?: boolean; intervention?: boolean };
 
 export type HarnessDoc = {
   runs: any[];

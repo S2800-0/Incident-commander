@@ -1,20 +1,28 @@
 import { useEffect, useState } from "react";
 import {
-  Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, ResponsiveContainer,
+  Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts";
 import { HarnessDoc } from "./types";
+
+// Cisco palette values used inside Recharts (Recharts wants JS strings, not vars).
+const C_GREEN = "#27AE60";
+const C_CRITICAL = "#E74C3C";
+const C_BLUE = "#049FD9";
+const C_GRID = "#E1E6EB";
+const C_TEXT_DIM = "#85929E";
+const C_TEXT = "#566573";
 
 export default function MetricsPanel() {
   const [doc, setDoc] = useState<HarnessDoc | null>(null);
   useEffect(() => {
     fetch("/harness").then((r) => r.json()).then(setDoc).catch(() => {});
   }, []);
-  if (!doc) return <div className="pane"><div className="idle">loading harness_results.json…</div></div>;
+  if (!doc) return <div className="chartCard">loading harness_results.json…</div>;
   const s = doc.summary;
 
   const perSlice = Object.entries(s.per_slice).map(([slice, v]) => ({
-    slice: slice.replace("_", " "),
+    slice: slice.replace(/_/g, " "),
     ON: Math.round(v.probes_on * 100),
     OFF: Math.round(v.probes_off * 100),
   }));
@@ -28,64 +36,73 @@ export default function MetricsPanel() {
 
   return (
     <div className="metrics">
-      <div className="headline">
-        <div className="big">
-          <div className="bigNum">{Math.round(s.headline_ablation.delta * 100)}%</div>
-          <div className="bigLbl">top-1 accuracy delta on<br />{s.headline_ablation.slices.join(" + ")}</div>
-        </div>
-        <div className="kpis">
-          <Kpi label="accuracy · probes ON" value={`${Math.round(s.top1_accuracy.probes_on * 100)}%`} good />
-          <Kpi label="accuracy · probes OFF" value={`${Math.round(s.top1_accuracy.probes_off * 100)}%`} />
-          <Kpi label="false-positive rollback · OFF (adversarial)" value={`${Math.round(s.false_positive_rollback_rate.adversarial_off * 100)}%`} />
-          <Kpi label="false-positive rollback · ON (adversarial)" value={`${Math.round(s.false_positive_rollback_rate.adversarial_on * 100)}%`} good />
-          <Kpi label="Brier · ON" value={s.brier.probes_on.toFixed(3)} good />
-          <Kpi label="Brier · OFF" value={s.brier.probes_off.toFixed(3)} />
-        </div>
+      {/* KPI header row — the headline read-out */}
+      <div className="kpiRow">
+        <Kpi cat="Δ Accuracy (hard slices)"
+             value={`+${Math.round(s.headline_ablation.delta * 100)}%`}
+             sub={`${Math.round(s.headline_ablation.probes_off * 100)}% → ${Math.round(s.headline_ablation.probes_on * 100)}%`}
+             tone="good" />
+        <Kpi cat="Top-1 · Policy ON"
+             value={`${Math.round(s.top1_accuracy.probes_on * 100)}%`}
+             sub={`of ${doc.runs.filter((r: any) => r.probes_enabled).length} runs`}
+             tone="good" />
+        <Kpi cat="FP Rollback · Adversarial"
+             value={`${Math.round(s.false_positive_rollback_rate.adversarial_off * 100)}% → ${Math.round(s.false_positive_rollback_rate.adversarial_on * 100)}%`}
+             sub="off → on, adversarial slice"
+             tone="good" />
+        <Kpi cat="Brier Score · ON"
+             value={s.brier.probes_on.toFixed(3)}
+             sub={`baseline ${s.brier.probes_off.toFixed(3)}`}
+             tone="good" />
       </div>
 
+      {/* Charts */}
       <div className="charts">
         <div className="chartCard">
-          <h3>Ablation — top-1 accuracy by slice (probes ON vs OFF)</h3>
+          <h3>Top-1 Accuracy by Slice · Policy ON vs OFF</h3>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={perSlice}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#233" />
-              <XAxis dataKey="slice" stroke="#8aa" fontSize={12} />
-              <YAxis domain={[0, 100]} stroke="#8aa" fontSize={12} unit="%" />
-              <Tooltip contentStyle={{ background: "#0d1520", border: "1px solid #2a3a4a" }} />
-              <Legend />
-              <Bar dataKey="ON" fill="#39d98a" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="OFF" fill="#e5533c" radius={[4, 4, 0, 0]} />
+              <CartesianGrid strokeDasharray="3 3" stroke={C_GRID} />
+              <XAxis dataKey="slice" stroke={C_TEXT} fontSize={11} />
+              <YAxis domain={[0, 100]} stroke={C_TEXT} fontSize={11} unit="%" />
+              <Tooltip contentStyle={{ background: "#FFFFFF", border: `1px solid ${C_GRID}`, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="ON" fill={C_GREEN} radius={[3, 3, 0, 0]} />
+              <Bar dataKey="OFF" fill={C_CRITICAL} radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
         <div className="chartCard">
-          <h3>Reliability diagram (predicted confidence vs empirical accuracy)</h3>
+          <h3>Reliability Diagram · Predicted Confidence vs Empirical Accuracy</h3>
           <ResponsiveContainer width="100%" height={260}>
             <LineChart>
-              <CartesianGrid strokeDasharray="3 3" stroke="#233" />
-              <XAxis type="number" dataKey="predicted" domain={[0, 100]} stroke="#8aa" fontSize={12} unit="%" name="predicted" />
-              <YAxis type="number" domain={[0, 100]} stroke="#8aa" fontSize={12} unit="%" />
-              <Tooltip contentStyle={{ background: "#0d1520", border: "1px solid #2a3a4a" }} />
-              <Line data={diag} dataKey="ideal" stroke="#456" strokeDasharray="6 4" dot={false} name="perfect" />
-              <Line data={reliability} dataKey="empirical" stroke="#5ac8fa" strokeWidth={2} dot={{ r: 4 }} name="observed" />
+              <CartesianGrid strokeDasharray="3 3" stroke={C_GRID} />
+              <XAxis type="number" dataKey="predicted" domain={[0, 100]} stroke={C_TEXT} fontSize={11} unit="%" name="predicted" />
+              <YAxis type="number" domain={[0, 100]} stroke={C_TEXT} fontSize={11} unit="%" />
+              <Tooltip contentStyle={{ background: "#FFFFFF", border: `1px solid ${C_GRID}`, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Line data={diag} dataKey="ideal" stroke={C_TEXT_DIM} strokeDasharray="6 4" dot={false} name="perfect" />
+              <Line data={reliability} dataKey="empirical" stroke={C_BLUE} strokeWidth={2} dot={{ r: 4, fill: C_BLUE }} name="observed" />
             </LineChart>
           </ResponsiveContainer>
         </div>
       </div>
+
       <p className="disclaimer">
-        Three bundles — numbers are illustrative, not publication-grade. The point is the
-        sign and size of the ablation delta, reproducible offline via <code>python -m ic.harness</code>.
+        Eight authored bundles across five slices; numbers are illustrative, not publication-grade.
+        The headline is the sign and size of the delta, reproducible offline with <code>python -m ic.harness</code>.
       </p>
     </div>
   );
 }
 
-function Kpi({ label, value, good }: { label: string; value: string; good?: boolean }) {
+function Kpi({ cat, value, sub, tone }: { cat: string; value: string; sub?: string; tone?: "good" | "bad" }) {
   return (
-    <div className={`kpi ${good ? "good" : ""}`}>
-      <div className="kval">{value}</div>
-      <div className="klbl">{label}</div>
+    <div className={`kpi ${tone === "good" ? "good" : tone === "bad" ? "bad" : ""}`}>
+      <div className="kpiCat">{cat}</div>
+      <div className="kpiValue">{value}</div>
+      {sub && <div className="kpiSub">{sub}</div>}
     </div>
   );
 }
